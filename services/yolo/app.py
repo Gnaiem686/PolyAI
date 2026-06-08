@@ -24,13 +24,28 @@ Instrumentator().instrument(app).expose(app)
 # Confidence threshold for object detection (0.0 - 1.0).
 # Detections below this score are discarded.
 # Override with: export CONFIDENCE_THRESHOLD=0.7
-_raw_threshold = os.environ.get("CONFIDENCE_THRESHOLD")
-if _raw_threshold is not None:
-    CONFIDENCE_THRESHOLD = float(_raw_threshold)
-    logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD} (from environment)")
-else:
-    CONFIDENCE_THRESHOLD = 0.5
-    logging.info(f"CONFIDENCE_THRESHOLD not set, using default: {CONFIDENCE_THRESHOLD}")
+
+#########################################################
+# _raw_threshold = os.environ.get("CONFIDENCE_THRESHOLD")
+# if _raw_threshold is not None:
+#     CONFIDENCE_THRESHOLD = float(_raw_threshold)
+#     logging.info(f"CONFIDENCE_THRESHOLD set to {CONFIDENCE_THRESHOLD} (from environment)")
+# else:
+#     CONFIDENCE_THRESHOLD = 0.5
+#     logging.info(f"CONFIDENCE_THRESHOLD not set, using default: {CONFIDENCE_THRESHOLD}")
+def get_confidence_threshold():
+    raw_threshold = os.environ.get("CONFIDENCE_THRESHOLD")
+
+    if raw_threshold is not None:
+        threshold = float(raw_threshold)
+        logging.info(f"CONFIDENCE_THRESHOLD set to {threshold} (from environment)")
+        return threshold
+
+    logging.info("CONFIDENCE_THRESHOLD not set, using default: 0.5")
+    return 0.5
+
+CONFIDENCE_THRESHOLD = get_confidence_threshold()
+#######################################################
 
 UPLOAD_DIR = "uploads/original"
 PREDICTED_DIR = "uploads/predicted"
@@ -95,10 +110,14 @@ def save_detection_object(prediction_uid, label, score, box):
 
 @app.post("/predict")
 def predict(file: UploadFile = File(...)):
-    start_time = time.time()
     """
     Predict objects in an image
     """
+    start_time = time.time()
+    extensions = (".jpg", ".jpeg", ".png")
+    if not file.filename.lower().endswith(extensions):
+        raise HTTPException(status_code=400, detail="Only image files are supported")
+    
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
@@ -180,7 +199,6 @@ def get_prediction_image(uid: str):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(row[0])
 
-
 @app.get("/health")
 def health():
     """
@@ -188,7 +206,90 @@ def health():
     """
     return {"status": "ok"}
 
-if __name__ == "__main__":
+@app.get("/predictions/label/")
+def get_predictions_by_empty_label():
+    raise HTTPException(status_code=400, detail="Label cannot be empty")
+
+
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    """
+    Return all prediction sessions that contain at least one detected object
+    with the given label.
+    """
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        sessions = conn.execute("""
+            SELECT DISTINCT ps.uid, ps.timestamp
+            FROM prediction_sessions ps
+            JOIN detection_objects do ON ps.uid = do.prediction_uid
+            WHERE do.label = ?
+        """, (label,)).fetchall()
+
+        result = []
+
+        for session in sessions:
+            objects = conn.execute("""
+                SELECT id, label, score, box
+                FROM detection_objects
+                WHERE prediction_uid = ? AND label = ?
+            """, (session["uid"], label)).fetchall()
+
+            result.append({
+                "uid": session["uid"],
+                "timestamp": session["timestamp"],
+                "detection_objects": [
+                    {
+                        "id": obj["id"],
+                        "label": obj["label"],
+                        "score": obj["score"],
+                        "box": obj["box"]
+                    }
+                    for obj in objects
+                ]
+            })
+
+        return result
+    
+@app.get("/predictions/score/")
+def get_predictions_by_empty_score():
+    raise HTTPException(status_code=400, detail="score cannot be empty")
+
+@app.get("/predictions/score/{min_score}")
+def get_predictions_by_score(min_score: float):
+    """
+    Return all detection objects whose confidence score is greater than
+    or equal to min_score.
+    """
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail="min_score must be between 0.0 and 1.0"
+        )
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        objects = conn.execute("""
+            SELECT id, prediction_uid, label, score, box
+            FROM detection_objects
+            WHERE score >= ?
+        """, (min_score,)).fetchall()
+
+        return [
+            {
+                "id": obj["id"],
+                "prediction_uid": obj["prediction_uid"],
+                "label": obj["label"],
+                "score": obj["score"],
+                "box": obj["box"]
+            }
+            for obj in objects
+        ]
+
+if __name__ == "__main__": #pragma: no cover
     import uvicorn
 
     init_db()
