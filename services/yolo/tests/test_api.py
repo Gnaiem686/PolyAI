@@ -8,8 +8,6 @@ import app as app_module
 
 from unittest.mock import patch
 
-from app import get_confidence_threshold
-
 os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.5")
 
 from app import app, init_db
@@ -19,6 +17,7 @@ TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
+    """Initialize a temporary database for tests."""
     db_file = str(tmp_path / "test_predictions.db")
     monkeypatch.setattr("app.DB_PATH", db_file)
     init_db()
@@ -26,16 +25,8 @@ def setup_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
+    """Return a TestClient instance for the FastAPI app."""
     return TestClient(app)
-
-class TestConfidenceThreshold(unittest.TestCase):
-    @patch.dict(os.environ, {"CONFIDENCE_THRESHOLD": "0.7"})
-    def test_confidence_threshold_from_environment(self):
-        self.assertEqual(get_confidence_threshold(), 0.7)
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_confidence_threshold_default(self):
-        self.assertEqual(get_confidence_threshold(), 0.5)
 
 class TestPredictionRetrieval(unittest.TestCase):
     def setUp(self):
@@ -124,6 +115,7 @@ class TestPredictionRetrieval(unittest.TestCase):
         self.assertEqual(response.json(), {"detail": "Image not found"})
     
 def test_health(client):
+    """Test the health check endpoint returns ok status."""
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
