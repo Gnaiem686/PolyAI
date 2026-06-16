@@ -9,7 +9,6 @@ import os
 import uuid
 import shutil
 import time
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,7 +20,7 @@ torch.cuda.is_available = lambda: False
 app = FastAPI()
 @app.on_event("shutdown")
 def shutdown_event():
-    print("Yolo is shutting down gracfully",flush=True)
+    print("Yolo service is shutting down gracefully", flush=True)
     logger.info("Yolo service is shutting down gracefully")
 
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
