@@ -64,4 +64,4 @@ curl -X POST -F "file=@your_image.jpg" http://localhost:8080/predict
 
 2. View detection results (replace {uid} with the ID returned from the upload):
 ```bash
-curl http://localhost:8080/prediction/{uid} 
+curl http://localhost:8080/prediction/{uid} # redeploy prod test
