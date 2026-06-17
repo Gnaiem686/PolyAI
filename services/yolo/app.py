@@ -219,6 +219,10 @@ def get_version():
         "environment": os.getenv("APP_ENV", "unknown")
     }
 
+@app.get("/ping")
+def ping():
+    return {"message": "pong"}
+
 @app.get("/predictions/label/")
 def get_predictions_by_empty_label():
     raise HTTPException(status_code=400, detail="Label cannot be empty")
