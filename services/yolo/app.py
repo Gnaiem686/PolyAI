@@ -211,6 +211,14 @@ def health():
     """
     return {"status": "ok"}
 
+@app.get("/version")
+def get_version():
+    return {
+        "service": "yolo",
+        "version": "1.0.0",
+        "environment": os.getenv("APP_ENV", "unknown")
+    }
+
 @app.get("/predictions/label/")
 def get_predictions_by_empty_label():
     raise HTTPException(status_code=400, detail="Label cannot be empty")
