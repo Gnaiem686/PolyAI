@@ -120,6 +120,23 @@ def test_health(client):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+def test_ready_ok(client):
+    response = client.get("/ready") ###
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+def test_ready_during_shutdown(client, monkeypatch):
+    import sys
+
+    app_module = sys.modules["app"]
+    monkeypatch.setattr(app_module, "is_shutting_down", True)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Service is shutting down"
+
 class TestLabelEndpoint(unittest.TestCase):
     def setUp(self):
         fd, db_path = tempfile.mkstemp(suffix=".db")

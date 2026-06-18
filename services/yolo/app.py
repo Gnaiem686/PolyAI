@@ -9,9 +9,13 @@ import os
 import uuid
 import shutil
 import time
+import signal
+import sys
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
 
 # Disable GPU usage
 import torch
@@ -22,6 +26,31 @@ app = FastAPI()
 def shutdown_event():
     print("Yolo service is shutting down gracefully", flush=True)
     logger.info("Yolo service is shutting down gracefully")
+
+is_shutting_down = False
+
+
+def handle_sigterm(signum, frame):
+    global is_shutting_down
+    is_shutting_down = True
+
+    logger.info("Received SIGTERM. Shutting down gracefully...")
+
+    # simulate cleanup (DB close, etc.)
+    logger.info("Cleanup done. Exiting.")
+
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+
+@app.get("/ready")
+def ready():
+    if is_shutting_down:
+        raise HTTPException(status_code=503, detail="Service is shutting down")
+
+    return {"status": "ready"}
 
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
