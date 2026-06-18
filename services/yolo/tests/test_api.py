@@ -127,8 +127,10 @@ def test_ready_ok(client):
     assert response.json() == {"status": "ready"}
 
 def test_ready_during_shutdown(client, monkeypatch):
+    import sys
 
-    monkeypatch.setattr(app, "is_shutting_down", True)
+    app_module = sys.modules["app"]
+    monkeypatch.setattr(app_module, "is_shutting_down", True)
 
     response = client.get("/ready")
 
