@@ -44,7 +44,7 @@ def handle_sigterm(signum, frame):
 
 signal.signal(signal.SIGTERM, handle_sigterm)
 
-
+## ready end point 
 @app.get("/ready")
 def ready():
     if is_shutting_down:
