@@ -52,6 +52,14 @@ def ready():
 
     return {"status": "ready"}
 
+@app.get("/ready2")
+def ready2():
+    if is_shutting_down:
+        raise HTTPException(status_code=503, detail="Service is shutting down")
+
+    return {"status": "ready2"}
+
+
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
 
