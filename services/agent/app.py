@@ -110,7 +110,7 @@ app = FastAPI(title="Vision Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://54.225.154.109:3000/"],
+    allow_origins=["http://localhost:3000", "http://54.225.154.109:3000"],
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )
