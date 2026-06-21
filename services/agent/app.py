@@ -31,6 +31,7 @@ MODEL = os.environ.get("MODEL")
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -87,7 +88,16 @@ def run_agent(history: list) -> str:
 
         # No tool calls, the model produced its final answer
         if not response.tool_calls:
-            return response.content
+            if isinstance(response.content, str):
+                return response.content
+
+            if isinstance(response.content, list):
+                return "\n".join(
+                    part.get("text", str(part)) if isinstance(part, dict) else str(part)
+                    for part in response.content
+                )
+
+            return str(response.content)
 
         # Execute every tool the model requested
         for tool_call in response.tool_calls:
@@ -100,7 +110,7 @@ app = FastAPI(title="Vision Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://54.225.154.109:3000/"],
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )
