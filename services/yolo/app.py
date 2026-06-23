@@ -1,10 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
 import logging
+import json
 import os
 import uuid
 import shutil
@@ -95,6 +97,33 @@ DB_PATH = "predictions.db"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
+
+class DetectionObject(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: list[float]
+
+
+class YoloPredictResponse(BaseModel):
+    uid: str
+    prediction_uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    detection_objects: list[DetectionObject]
+    detection_count: int
+    time_took: float
+
+
+class PredictionSessionResponse(BaseModel):
+    uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    detection_objects: list[DetectionObject]
+
+
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")  
 
@@ -147,9 +176,9 @@ def save_detection_object(prediction_uid, label, score, box):
         conn.execute("""
             INSERT INTO detection_objects (prediction_uid, label, score, box)
             VALUES (?, ?, ?, ?)
-        """, (prediction_uid, label, score, str(box)))
+        """, (prediction_uid, label, score, json.dumps(box)))
 
-@app.post("/predict")
+@app.post("/predict", response_model=YoloPredictResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
@@ -175,6 +204,7 @@ def predict(file: UploadFile = File(...)):
 
     save_prediction_session(uid, original_path, predicted_path)
     
+    detection_objects = []
     detected_labels = []
     for box in results[0].boxes:
         label_idx = int(box.cls[0].item())
@@ -182,18 +212,35 @@ def predict(file: UploadFile = File(...)):
         score = float(box.conf[0])
         bbox = box.xyxy[0].tolist()
         save_detection_object(uid, label, score, bbox)
+        detection_objects.append({
+            "id": len(detection_objects) + 1,
+            "label": label,
+            "score": score,
+            "box": bbox,
+        })
         detected_labels.append(label)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT timestamp FROM prediction_sessions WHERE uid = ?",
+            (uid,),
+        ).fetchone()
 
     processing_time = round(time.time() - start_time, 2)
 
     return {
-        "prediction_uid": uid, 
-        "detection_count": len(results[0].boxes),
-        "labels": detected_labels,
-        "time_took": processing_time
+        "uid": uid,
+        "prediction_uid": uid,
+        "timestamp": row["timestamp"],
+        "original_image": original_path,
+        "predicted_image": predicted_path,
+        "detection_objects": detection_objects,
+        "detection_count": len(detection_objects),
+        "time_took": processing_time,
     }
 
-@app.get("/prediction/{uid}")
+@app.get("/prediction/{uid}", response_model=PredictionSessionResponse)
 def get_prediction_by_uid(uid: str):
     """
     Get prediction session by uid with all detected objects
@@ -221,7 +268,7 @@ def get_prediction_by_uid(uid: str):
                     "id": obj["id"],
                     "label": obj["label"],
                     "score": obj["score"],
-                    "box": obj["box"]
+                    "box": json.loads(obj["box"])
                 } for obj in objects
             ]
         }
@@ -298,7 +345,7 @@ def get_predictions_by_label(label: str):
                         "id": obj["id"],
                         "label": obj["label"],
                         "score": obj["score"],
-                        "box": obj["box"]
+                        "box": json.loads(obj["box"])
                     }
                     for obj in objects
                 ]
@@ -337,7 +384,7 @@ def get_predictions_by_score(min_score: float):
                 "prediction_uid": obj["prediction_uid"],
                 "label": obj["label"],
                 "score": obj["score"],
-                "box": obj["box"]
+                "box": json.loads(obj["box"])
             }
             for obj in objects
         ]
