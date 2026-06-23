@@ -104,6 +104,12 @@ class DetectionObject(BaseModel):
     score: float
     box: list[float]
 
+class StoredDetectionObject(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: str 
+
 
 class YoloPredictResponse(BaseModel):
     uid: str
@@ -111,6 +117,7 @@ class YoloPredictResponse(BaseModel):
     timestamp: str
     original_image: str
     predicted_image: str
+    labels: list[str]
     detection_objects: list[DetectionObject]
     detection_count: int
     time_took: float
@@ -121,7 +128,12 @@ class PredictionSessionResponse(BaseModel):
     timestamp: str
     original_image: str
     predicted_image: str
-    detection_objects: list[DetectionObject]
+    detection_objects: list[StoredDetectionObject]
+
+class LabelPredictionResponse(BaseModel):
+    uid: str
+    timestamp: str
+    detection_objects: list[StoredDetectionObject]
 
 
 # Download the AI model (tiny model ~6MB)
@@ -235,6 +247,7 @@ def predict(file: UploadFile = File(...)):
         "timestamp": row["timestamp"],
         "original_image": original_path,
         "predicted_image": predicted_path,
+        "labels": detected_labels,
         "detection_objects": detection_objects,
         "detection_count": len(detection_objects),
         "time_took": processing_time,
@@ -268,7 +281,7 @@ def get_prediction_by_uid(uid: str):
                     "id": obj["id"],
                     "label": obj["label"],
                     "score": obj["score"],
-                    "box": json.loads(obj["box"])
+                    "box": obj["box"]
                 } for obj in objects
             ]
         }
@@ -345,7 +358,7 @@ def get_predictions_by_label(label: str):
                         "id": obj["id"],
                         "label": obj["label"],
                         "score": obj["score"],
-                        "box": json.loads(obj["box"])
+                        "box": obj["box"]
                     }
                     for obj in objects
                 ]
@@ -384,7 +397,7 @@ def get_predictions_by_score(min_score: float):
                 "prediction_uid": obj["prediction_uid"],
                 "label": obj["label"],
                 "score": obj["score"],
-                "box": json.loads(obj["box"])
+                "box": obj["box"]
             }
             for obj in objects
         ]
