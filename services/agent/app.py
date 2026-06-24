@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from typing import Optional
 
 from dotenv import load_dotenv
+import time
 load_dotenv()
 
 logging.basicConfig(
@@ -73,45 +74,85 @@ TOOLS = {
 llm = init_chat_model(MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
-def run_agent(history: list) -> str:
+def run_agent(history: list, max_iterations: int = 10) -> dict:
     """
     Simple ReAct loop:
       1. Send messages to the LLM.
       2. If the LLM requests tool calls, execute them and append results.
       3. Repeat until the LLM returns a plain text response.
+      4. Stop after max_iterations to guard against infinite loops.
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
+    iterations = 0
+    tools_called: list[str] = []
+    prediction_id: Optional[str] = None
+    annotated_image: Optional[str] = None
+    context_limit_exceeded = False
 
     while True:
+        if iterations >= max_iterations:
+            context_limit_exceeded = True
+            return {
+                "response": (
+                    "I reached the maximum number of reasoning steps while trying to answer. "
+                    "Please try rephrasing your request or ask a simpler question."
+                ),
+                "prediction_id": prediction_id,
+                "annotated_image": annotated_image,
+                "agent_loop_time_s": 0.0,
+                "iterations": iterations,
+                "tools_called": tools_called,
+                "context_limit_exceeded": context_limit_exceeded,
+            }
+
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
+        iterations += 1
 
-        # No tool calls, the model produced its final answer
-        if not response.tool_calls:
-            if isinstance(response.content, str):
-                return response.content
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                tools_called.append(tool_call["name"])
+                tool_fn = TOOLS[tool_call["name"]]
+                tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
+                messages.append(tool_result)
 
-            if isinstance(response.content, list):
-                return "\n".join(
-                    part.get("text", str(part)) if isinstance(part, dict) else str(part)
-                    for part in response.content
-                )
+                try:
+                    parsed = json.loads(tool_result.content)
+                    if isinstance(parsed, dict):
+                        prediction_id = parsed.get("uid") or parsed.get("prediction_uid") or prediction_id
+                        annotated_image = parsed.get("annotated_image", annotated_image)
+                except Exception:
+                    pass
 
-            return str(response.content)
+            continue
 
-        # Execute every tool the model requested
-        for tool_call in response.tool_calls:
-            tool_fn = TOOLS[tool_call["name"]]
-            tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
-            messages.append(tool_result)
+        if isinstance(response.content, str):
+            final_response = response.content
+        elif isinstance(response.content, list):
+            final_response = "\n".join(
+                part.get("text", str(part)) if isinstance(part, dict) else str(part)
+                for part in response.content
+            )
+        else:
+            final_response = str(response.content)
+
+        return {
+            "response": final_response,
+            "prediction_id": prediction_id,
+            "annotated_image": annotated_image,
+            "agent_loop_time_s": 0.0,
+            "iterations": iterations,
+            "tools_called": tools_called,
+            "context_limit_exceeded": context_limit_exceeded,
+        }
 
 
 app = FastAPI(title="Vision Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://54.225.154.109:3000", "http://3.218.178.230:3000"],
-    allow_methods=["POST", "GET"],
+    allow_origins=["http://localhost:3000", "http://gnaiem-dev.fursa.click:3000", "http://gnaiem-prod.fursa.click:3000"],
+    allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -128,6 +169,12 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    prediction_id: Optional[str] = None
+    annotated_image: Optional[str] = None
+    agent_loop_time_s: float
+    iterations: int
+    tools_called: list[str]
+    context_limit_exceeded: bool = False
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -148,7 +195,10 @@ def chat(request: ChatRequest):
 
     token = _current_image_b64.set(latest_image)
     try:
-        return ChatResponse(response=run_agent(lc_messages))
+        start_time = time.time()
+        result = run_agent(lc_messages)
+        result["agent_loop_time_s"] = round(time.time() - start_time, 2)
+        return ChatResponse(**result)
     finally:
         _current_image_b64.reset(token)
 

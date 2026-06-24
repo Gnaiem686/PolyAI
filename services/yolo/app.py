@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel
 from ultralytics import YOLO
 from PIL import Image
 import logging
+import json
 import os
 import uuid
 import shutil
@@ -101,6 +103,45 @@ PREDICTED_DIR = "uploads/predicted"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
+
+
+class DetectionObject(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: list[float]
+
+class StoredDetectionObject(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: str 
+
+
+class YoloPredictResponse(BaseModel):
+    uid: str
+    prediction_uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    labels: list[str]
+    detection_objects: list[DetectionObject]
+    detection_count: int
+    time_took: float
+
+
+class PredictionSessionResponse(BaseModel):
+    uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    detection_objects: list[StoredDetectionObject]
+
+class LabelPredictionResponse(BaseModel):
+    uid: str
+    timestamp: str
+    detection_objects: list[StoredDetectionObject]
+
 
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")
