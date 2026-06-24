@@ -105,7 +105,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
 
-class DetectionObject(BaseModel):
+class DetectionObjectResponse(BaseModel):
     id: int
     label: str
     score: float
@@ -125,7 +125,7 @@ class YoloPredictResponse(BaseModel):
     original_image: str
     predicted_image: str
     labels: list[str]
-    detection_objects: list[DetectionObject]
+    detection_objects: list[DetectionObjectResponse]
     detection_count: int
     time_took: float
 
