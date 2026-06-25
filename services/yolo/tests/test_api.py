@@ -1,26 +1,39 @@
 import os
 import pytest
-import sqlite3
 import tempfile
 import unittest
 from fastapi.testclient import TestClient
-import app as app_module
+import db as db_module
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from unittest.mock import patch
 
 os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.5")
 
 from app import app, init_db
+from models import DetectionObject, PredictionSession
 
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
-    """Initialize a temporary database for tests."""
-    db_file = str(tmp_path / "test_predictions.db")
-    monkeypatch.setattr("app.DB_PATH", db_file)
-    init_db()
+    """Initialize a temporary SQLite database for tests."""
+    db_file = tmp_path / "test_predictions.db"
+    test_engine = create_engine(
+        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}, future=True
+    )
+    test_session = sessionmaker(autocommit=False, autoflush=False, bind=test_engine, future=True)
+
+    monkeypatch.setattr(db_module, "engine", test_engine)
+    monkeypatch.setattr(db_module, "SessionLocal", test_session)
+
+    init_db(custom_engine=test_engine)
+
+    yield
+
+    test_engine.dispose()
 
 
 @pytest.fixture
@@ -30,12 +43,6 @@ def client():
 
 class TestPredictionRetrieval(unittest.TestCase):
     def setUp(self):
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-
-        self.db_path = db_path
-        app_module.DB_PATH = db_path
-
         self.temp_dir = tempfile.TemporaryDirectory()
         self.predicted_image_path = os.path.join(
             self.temp_dir.name,
@@ -45,32 +52,28 @@ class TestPredictionRetrieval(unittest.TestCase):
         with open(self.predicted_image_path, "wb") as f:
             f.write(b"fake image content")
 
-        init_db()
         self.client = TestClient(app)
 
     def tearDown(self):
-        if os.path.exists(self.db_path):
-            os.remove(self.db_path)
-
         self.temp_dir.cleanup()
 
     def insert_test_prediction(self, uid="abc-123"):
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-                VALUES (?, ?, ?)
-                """,
-                (uid, "original.jpg", self.predicted_image_path),
+        with db_module.SessionLocal() as session:
+            prediction_session = PredictionSession(
+                uid=uid,
+                original_image="original.jpg",
+                predicted_image=self.predicted_image_path,
             )
-
-            conn.execute(
-                """
-                INSERT INTO detection_objects (prediction_uid, label, score, box)
-                VALUES (?, ?, ?, ?)
-                """,
-                (uid, "person", 0.91, "[10, 20, 100, 200]"),
+            session.add(prediction_session)
+            session.add(
+                DetectionObject(
+                    prediction_uid=uid,
+                    label="person",
+                    score=0.91,
+                    box="[10, 20, 100, 200]",
+                )
             )
+            session.commit()
 
     def test_get_prediction_by_uid_found(self):
         self.insert_test_prediction(uid="abc-123")
@@ -121,7 +124,7 @@ def test_health(client):
     assert response.json() == {"status": "ok"}
 
 def test_ready_ok(client):
-    response = client.get("/ready") ###
+    response = client.get("/ready")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
@@ -139,36 +142,25 @@ def test_ready_during_shutdown(client, monkeypatch):
 
 class TestLabelEndpoint(unittest.TestCase):
     def setUp(self):
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-
-        self.db_path = db_path
-        app_module.DB_PATH = db_path
-
-        init_db()
         self.client = TestClient(app)
 
-    def tearDown(self):
-        if os.path.exists(self.db_path):
-            os.remove(self.db_path)
-
     def insert_test_prediction(self, uid="abc-123", label="person", score=0.91):
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-                VALUES (?, ?, ?)
-                """,
-                (uid, "original.jpg", "predicted.jpg"),
+        with db_module.SessionLocal() as session:
+            prediction_session = PredictionSession(
+                uid=uid,
+                original_image="original.jpg",
+                predicted_image="predicted.jpg",
             )
-
-            conn.execute(
-                """
-                INSERT INTO detection_objects (prediction_uid, label, score, box)
-                VALUES (?, ?, ?, ?)
-                """,
-                (uid, label, score, "[10, 20, 100, 200]"),
+            session.add(prediction_session)
+            session.add(
+                DetectionObject(
+                    prediction_uid=uid,
+                    label=label,
+                    score=score,
+                    box="[10, 20, 100, 200]",
+                )
             )
+            session.commit()
 
     def test_get_predictions_by_label_found(self):
         self.insert_test_prediction(label="person", score=0.91)
@@ -194,36 +186,25 @@ class TestLabelEndpoint(unittest.TestCase):
 
 class TestScoreEndpoint(unittest.TestCase):
     def setUp(self):
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-
-        self.db_path = db_path
-        app_module.DB_PATH = db_path
-
-        init_db()
         self.client = TestClient(app)
 
-    def tearDown(self):
-        if os.path.exists(self.db_path):
-            os.remove(self.db_path)
-
     def insert_test_prediction(self, uid="abc-123", label="person", score=0.91):
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-                VALUES (?, ?, ?)
-                """,
-                (uid, "original.jpg", "predicted.jpg"),
+        with db_module.SessionLocal() as session:
+            prediction_session = PredictionSession(
+                uid=uid,
+                original_image="original.jpg",
+                predicted_image="predicted.jpg",
             )
-
-            conn.execute(
-                """
-                INSERT INTO detection_objects (prediction_uid, label, score, box)
-                VALUES (?, ?, ?, ?)
-                """,
-                (uid, label, score, "[10, 20, 100, 200]"),
+            session.add(prediction_session)
+            session.add(
+                DetectionObject(
+                    prediction_uid=uid,
+                    label=label,
+                    score=score,
+                    box="[10, 20, 100, 200]",
+                )
             )
+            session.commit()
 
     def test_get_predictions_by_score_found(self):
         self.insert_test_prediction(label="person", score=0.91)
