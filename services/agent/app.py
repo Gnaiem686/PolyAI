@@ -7,6 +7,10 @@ from contextvars import ContextVar
 from typing import Optional
 
 from dotenv import load_dotenv
+
+import time
+from typing import Optional, List
+
 load_dotenv()
 
 logging.basicConfig(
@@ -73,37 +77,60 @@ TOOLS = {
 llm = init_chat_model(MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
-def run_agent(history: list) -> str:
-    """
-    Simple ReAct loop:
-      1. Send messages to the LLM.
-      2. If the LLM requests tool calls, execute them and append results.
-      3. Repeat until the LLM returns a plain text response.
-    """
+def run_agent(history: list, max_iterations: int = 10) -> dict:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
+    iterations = 0
+    tools_called = []
+    prediction_id = None
+    annotated_image = None
 
     while True:
+        if iterations >= max_iterations:
+            return {
+                "response": "I reached the maximum number of reasoning steps. Please try again with a simpler request.",
+                "prediction_id": prediction_id,
+                "annotated_image": annotated_image,
+                "agent_loop_time_s": 0.0,
+                "iterations": iterations,
+                "tools_called": tools_called,
+                "context_limit_exceeded": True,
+            }
+
+        iterations += 1
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
 
-        # No tool calls, the model produced its final answer
         if not response.tool_calls:
-            if isinstance(response.content, str):
-                return response.content
+            content = response.content
 
-            if isinstance(response.content, list):
-                return "\n".join(
+            if isinstance(content, list):
+                content = "\n".join(
                     part.get("text", str(part)) if isinstance(part, dict) else str(part)
-                    for part in response.content
+                    for part in content
                 )
 
-            return str(response.content)
+            return {
+                "response": str(content),
+                "prediction_id": prediction_id,
+                "annotated_image": annotated_image,
+                "agent_loop_time_s": 0.0,
+                "iterations": iterations,
+                "tools_called": tools_called,
+                "context_limit_exceeded": False,
+            }
 
-        # Execute every tool the model requested
         for tool_call in response.tool_calls:
+            tools_called.append(tool_call["name"])
             tool_fn = TOOLS[tool_call["name"]]
-            tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
+            tool_result = tool_fn.invoke(tool_call)
             messages.append(tool_result)
+
+            try:
+                tool_data = json.loads(tool_result.content)
+                prediction_id = tool_data.get("uid") or tool_data.get("prediction_uid") or prediction_id
+                annotated_image = tool_data.get("annotated_image", annotated_image)
+            except Exception:
+                pass
 
 
 app = FastAPI(title="Vision Agent")
@@ -128,6 +155,12 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    prediction_id: Optional[str] = None
+    annotated_image: Optional[str] = None
+    agent_loop_time_s: float
+    iterations: int
+    tools_called: List[str]
+    context_limit_exceeded: bool = False
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -148,7 +181,10 @@ def chat(request: ChatRequest):
 
     token = _current_image_b64.set(latest_image)
     try:
-        return ChatResponse(response=run_agent(lc_messages))
+        start_time = time.time()
+        result = run_agent(lc_messages)
+        result["agent_loop_time_s"] = round(time.time() - start_time, 2)
+        return ChatResponse(**result)
     finally:
         _current_image_b64.reset(token)
 
