@@ -1,9 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from ultralytics import YOLO
 from PIL import Image
-import sqlite3
 import logging
 import os
 import uuid
@@ -11,6 +10,7 @@ import shutil
 import time
 import signal
 import sys
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,6 +21,11 @@ import torch
 torch.cuda.is_available = lambda: False
 
 app = FastAPI()
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
 @app.on_event("shutdown")
 def shutdown_event():
     print("Yolo service is shutting down gracefully", flush=True)
@@ -90,66 +95,53 @@ CONFIDENCE_THRESHOLD = get_confidence_threshold()
 
 UPLOAD_DIR = "uploads/original"
 PREDICTED_DIR = "uploads/predicted"
-DB_PATH = "predictions.db"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
+class DetectionObjectResponse(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: list[float]
+
+
+class YoloPredictResponse(BaseModel):
+    uid: str
+    prediction_uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    labels: list[str]
+    detection_objects: list[DetectionObjectResponse]
+    detection_count: int
+    time_took: float
+
 # Download the AI model (tiny model ~6MB)
-model = YOLO("yolov8n.pt")  
-
-# Initialize SQLite
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        # Create the predictions main table to store the prediction session
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS prediction_sessions (
-                uid TEXT PRIMARY KEY,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                original_image TEXT,
-                predicted_image TEXT
-            )
-        """)
-        
-        # Create the objects table to store individual detected objects in a given image
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS detection_objects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prediction_uid TEXT,
-                label TEXT,
-                score REAL,
-                box TEXT,
-                FOREIGN KEY (prediction_uid) REFERENCES prediction_sessions (uid)
-            )
-        """)
-        
-        # Create index for faster queries
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prediction_uid ON detection_objects (prediction_uid)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
+model = YOLO("yolov8n.pt")
 
 
-def save_prediction_session(uid, original_image, predicted_image):
-    """
-    Save prediction session to database
-    """
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-            VALUES (?, ?, ?)
-        """, (uid, original_image, predicted_image))
+def save_prediction_session(db, uid, original_image, predicted_image):
+    prediction_session = PredictionSession(
+        uid=uid,
+        original_image=original_image,
+        predicted_image=predicted_image,
+    )
+    db.add(prediction_session)
+    return prediction_session
 
-def save_detection_object(prediction_uid, label, score, box):
-    """
-    Save detection object to database
-    """
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO detection_objects (prediction_uid, label, score, box)
-            VALUES (?, ?, ?, ?)
-        """, (prediction_uid, label, score, str(box)))
 
-@app.post("/predict")
+def save_detection_object(db, prediction_session, label, score, box):
+    detection_object = DetectionObject(
+        prediction_uid=prediction_session.uid,
+        label=label,
+        score=score,
+        box=str(box),
+    )
+    db.add(detection_object)
+    return detection_object
+
+@app.post("/predict", response_model=YoloPredictResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
@@ -173,72 +165,82 @@ def predict(file: UploadFile = File(...)):
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
-    save_prediction_session(uid, original_path, predicted_path)
-    
+    prediction_session = save_prediction_session(db, uid, original_path, predicted_path)
+
     detected_labels = []
+    detection_objects = []
     for box in results[0].boxes:
         label_idx = int(box.cls[0].item())
         label = model.names[label_idx]
         score = float(box.conf[0])
         bbox = box.xyxy[0].tolist()
-        save_detection_object(uid, label, score, bbox)
+        save_detection_object(db, prediction_session, label, score, bbox)
         detected_labels.append(label)
+
+        detection_objects.append({
+            "id": len(detection_objects) + 1,
+            "label": label,
+            "score": score,
+            "box": bbox,
+        })
 
     processing_time = round(time.time() - start_time, 2)
 
     return {
-        "prediction_uid": uid, 
-        "detection_count": len(results[0].boxes),
+        "uid": uid,
+        "prediction_uid": uid,
+        "timestamp": row["timestamp"],
+        "original_image": original_path,
+        "predicted_image": predicted_path,
         "labels": detected_labels,
-        "time_took": processing_time
+        "detection_objects": detection_objects,
+        "detection_count": len(detection_objects),
+        "time_took": processing_time,
     }
 
+
 @app.get("/prediction/{uid}")
-def get_prediction_by_uid(uid: str):
+def get_prediction_by_uid(uid: str, db=Depends(get_db)):
     """
     Get prediction session by uid with all detected objects
     """
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        # Get prediction session
-        session = conn.execute("SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)).fetchone()
-        if not session:
-            raise HTTPException(status_code=404, detail="Prediction not found")
-            
-        # Get all detection objects for this prediction
-        objects = conn.execute(
-            "SELECT * FROM detection_objects WHERE prediction_uid = ?", 
-            (uid,)
-        ).fetchall()
-        
-        return {
-            "uid": session["uid"],
-            "timestamp": session["timestamp"],
-            "original_image": session["original_image"],
-            "predicted_image": session["predicted_image"],
-            "detection_objects": [
-                {
-                    "id": obj["id"],
-                    "label": obj["label"],
-                    "score": obj["score"],
-                    "box": obj["box"]
-                } for obj in objects
-            ]
-        }
+    session_obj = (
+        db.query(PredictionSession)
+        .options(joinedload(PredictionSession.detection_objects))
+        .filter(PredictionSession.uid == uid)
+        .first()
+    )
+
+    if not session_obj:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+
+    return {
+        "uid": session_obj.uid,
+        "timestamp": session_obj.timestamp,
+        "original_image": session_obj.original_image,
+        "predicted_image": session_obj.predicted_image,
+        "detection_objects": [
+            {
+                "id": obj.id,
+                "label": obj.label,
+                "score": obj.score,
+                "box": obj.box,
+            }
+            for obj in session_obj.detection_objects
+        ],
+    }
 
 
 @app.get("/prediction/{uid}/image")
-def get_prediction_image(uid: str):
+def get_prediction_image(uid: str, db=Depends(get_db)):
     """
     Return the annotated (bounding-box) image for a prediction
     """
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT predicted_image FROM prediction_sessions WHERE uid = ?", (uid,)
-        ).fetchone()
-    if not row or not os.path.exists(row[0]):
+    session_obj = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
+    if not session_obj or not os.path.exists(session_obj.predicted_image):
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(row[0])
+
+    return FileResponse(session_obj.predicted_image)
 
 @app.get("/health")
 def health():
@@ -265,53 +267,45 @@ def get_predictions_by_empty_label():
 
 
 @app.get("/predictions/label/{label}")
-def get_predictions_by_label(label: str):
+def get_predictions_by_label(label: str, db=Depends(get_db)):
     """
     Return all prediction sessions that contain at least one detected object
     with the given label.
     """
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    sessions = (
+        db.query(PredictionSession)
+        .join(PredictionSession.detection_objects)
+        .options(joinedload(PredictionSession.detection_objects))
+        .filter(DetectionObject.label == label)
+        .distinct()
+        .all()
+    )
 
-        sessions = conn.execute("""
-            SELECT DISTINCT ps.uid, ps.timestamp
-            FROM prediction_sessions ps
-            JOIN detection_objects do ON ps.uid = do.prediction_uid
-            WHERE do.label = ?
-        """, (label,)).fetchall()
-
-        result = []
-
-        for session in sessions:
-            objects = conn.execute("""
-                SELECT id, label, score, box
-                FROM detection_objects
-                WHERE prediction_uid = ? AND label = ?
-            """, (session["uid"], label)).fetchall()
-
-            result.append({
-                "uid": session["uid"],
-                "timestamp": session["timestamp"],
-                "detection_objects": [
-                    {
-                        "id": obj["id"],
-                        "label": obj["label"],
-                        "score": obj["score"],
-                        "box": obj["box"]
-                    }
-                    for obj in objects
-                ]
-            })
-
-        return result
+    return [
+        {
+            "uid": session_obj.uid,
+            "timestamp": session_obj.timestamp,
+            "detection_objects": [
+                {
+                    "id": obj.id,
+                    "label": obj.label,
+                    "score": obj.score,
+                    "box": obj.box,
+                }
+                for obj in session_obj.detection_objects
+                if obj.label == label
+            ],
+        }
+        for session_obj in sessions
+    ]
     
 @app.get("/predictions/score/")
 def get_predictions_by_empty_score():
     raise HTTPException(status_code=400, detail="score cannot be empty")
 
 @app.get("/predictions/score/{min_score}")
-def get_predictions_by_score(min_score: float):
+def get_predictions_by_score(min_score: float, db=Depends(get_db)):
     """
     Return all detection objects whose confidence score is greater than
     or equal to min_score.
@@ -322,25 +316,18 @@ def get_predictions_by_score(min_score: float):
             detail="min_score must be between 0.0 and 1.0"
         )
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    objects = db.query(DetectionObject).filter(DetectionObject.score >= min_score).all()
 
-        objects = conn.execute("""
-            SELECT id, prediction_uid, label, score, box
-            FROM detection_objects
-            WHERE score >= ?
-        """, (min_score,)).fetchall()
-
-        return [
-            {
-                "id": obj["id"],
-                "prediction_uid": obj["prediction_uid"],
-                "label": obj["label"],
-                "score": obj["score"],
-                "box": obj["box"]
-            }
-            for obj in objects
-        ]
+    return [
+        {
+            "id": obj.id,
+            "prediction_uid": obj.prediction_uid,
+            "label": obj.label,
+            "score": obj.score,
+            "box": obj.box,
+        }
+        for obj in objects
+    ]
 
 if __name__ == "__main__": #pragma: no cover
     import uvicorn
