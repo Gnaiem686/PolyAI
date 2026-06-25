@@ -1,0 +1,30 @@
+{
+  "skill_name": "yolo-api-data-layer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "refactor the api to work with sqlalchemy",
+      "expected_output": "Creates services/yolo/models.py with PredictionSession and DetectionObject SQLAlchemy models, creates services/yolo/db.py with engine/session/get_db, removes sqlite3 usage from application code, uses Depends(get_db), and preserves all existing endpoints, status codes, and response shapes."
+    },
+    {
+      "id": 2,
+      "prompt": "make the database backend configurable so we can use postgres in production",
+      "expected_output": "Updates services/yolo/db.py to use SQLite by default and PostgreSQL when DB_BACKEND=postgres. Reads DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, and DB_NAME from environment variables, keeps SQLite tests working, and avoids hardcoded SQLite-only logic."
+    },
+    {
+      "id": 3,
+      "prompt": "add an endpoint GET /predictions/recent that returns the 10 most recent sessions",
+      "expected_output": "Adds an HTTP endpoint using Depends(get_db), queries PredictionSession ordered by timestamp descending with limit 10, returns the same session response structure as existing prediction endpoints, and adds TestClient tests with a temporary SQLite database."
+    },
+    {
+      "id": 4,
+      "prompt": "delete a prediction session and all its detection objects by uid",
+      "expected_output": "Implements deletion with SQLAlchemy ORM, deletes related DetectionObject rows using cascade or explicit ORM deletion, preserves expected HTTP status behavior, and adds tests proving both the session and related objects are removed."
+    },
+    {
+      "id": 5,
+      "prompt": "add a column processing_time_ms to the prediction_sessions table",
+      "expected_output": "Adds processing_time_ms to the PredictionSession SQLAlchemy model, stores processing time during /predict, preserves existing response compatibility, updates tests, and does not use raw SQL or sqlite3."
+    }
+  ]
+}

@@ -99,6 +99,34 @@ def run_agent(history: list, max_iterations: int = 10) -> dict:
         iterations += 1
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
+        iterations += 1
+
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                tools_called.append(tool_call["name"])
+                tool_fn = TOOLS[tool_call["name"]]
+                tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
+                messages.append(tool_result)
+
+                try:
+                    parsed = json.loads(tool_result.content)
+                    if isinstance(parsed, dict):
+                        prediction_id = parsed.get("uid") or parsed.get("prediction_uid") or prediction_id
+                        annotated_image = parsed.get("annotated_image", annotated_image)
+                except Exception:
+                    pass
+
+            continue
+
+        if isinstance(response.content, str):
+            final_response = response.content
+        elif isinstance(response.content, list):
+            final_response = "\n".join(
+                part.get("text", str(part)) if isinstance(part, dict) else str(part)
+                for part in response.content
+            )
+        else:
+            final_response = str(response.content)
 
         if not response.tool_calls:
             content = response.content
@@ -137,8 +165,8 @@ app = FastAPI(title="Vision Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://54.225.154.109:3000", "http://3.218.178.230:3000"],
-    allow_methods=["POST", "GET"],
+    allow_origins=["http://localhost:3000", "http://gnaiem-dev.fursa.click:3000", "http://gnaiem-prod.fursa.click:3000"],
+    allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
