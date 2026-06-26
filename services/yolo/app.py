@@ -10,10 +10,7 @@ import shutil
 import time
 import signal
 import sys
-from sqlalchemy.orm import joinedload
-
-from db import init_db, get_db
-from models import PredictionSession, DetectionObject
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -102,6 +99,24 @@ PREDICTED_DIR = "uploads/predicted"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
+class DetectionObjectResponse(BaseModel):
+    id: int
+    label: str
+    score: float
+    box: list[float]
+
+
+class YoloPredictResponse(BaseModel):
+    uid: str
+    prediction_uid: str
+    timestamp: str
+    original_image: str
+    predicted_image: str
+    labels: list[str]
+    detection_objects: list[DetectionObjectResponse]
+    detection_count: int
+    time_took: float
+
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")
 
@@ -126,8 +141,8 @@ def save_detection_object(db, prediction_session, label, score, box):
     db.add(detection_object)
     return detection_object
 
-@app.post("/predict")
-def predict(file: UploadFile = File(...), db=Depends(get_db)):
+@app.post("/predict", response_model=YoloPredictResponse)
+def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
     """
@@ -153,6 +168,7 @@ def predict(file: UploadFile = File(...), db=Depends(get_db)):
     prediction_session = save_prediction_session(db, uid, original_path, predicted_path)
 
     detected_labels = []
+    detection_objects = []
     for box in results[0].boxes:
         label_idx = int(box.cls[0].item())
         label = model.names[label_idx]
@@ -161,14 +177,24 @@ def predict(file: UploadFile = File(...), db=Depends(get_db)):
         save_detection_object(db, prediction_session, label, score, bbox)
         detected_labels.append(label)
 
-    db.commit()
+        detection_objects.append({
+            "id": len(detection_objects) + 1,
+            "label": label,
+            "score": score,
+            "box": bbox,
+        })
 
     processing_time = round(time.time() - start_time, 2)
 
     return {
+        "uid": uid,
         "prediction_uid": uid,
-        "detection_count": len(results[0].boxes),
+        "timestamp": row["timestamp"],
+        "original_image": original_path,
+        "predicted_image": predicted_path,
         "labels": detected_labels,
+        "detection_objects": detection_objects,
+        "detection_count": len(detection_objects),
         "time_took": processing_time,
     }
 
