@@ -84,15 +84,26 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     iterations = 0
+    tools_called = []
+    prediction_id = None
+    annotated_image = None
+    context_limit_exceeded = False
 
     while True:
         if iterations >= max_iterations:
-            return "I reached the maximum number of reasoning steps. Please try again with a simpler request."
+                return {
+                    "response": "I reached the maximum number of reasoning steps. Please try again with a simpler request.",
+                    "prediction_id": prediction_id,
+                    "annotated_image": annotated_image,
+                    "agent_loop_time_s": 0.0,
+                    "iterations": iterations,
+                    "tools_called": tools_called,
+                    "context_limit_exceeded": True,
+                }
 
         iterations += 1
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
-        iterations += 1
 
         if response.tool_calls:
             for tool_call in response.tool_calls:
