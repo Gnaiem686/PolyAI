@@ -34,6 +34,13 @@ ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
+
+    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    "bedrock/amazon.nova-micro-v1:0",
+    "bedrock/amazon.nova-lite-v1:0",
+    "bedrock/openai.gpt-oss-20b-1:0",
+    "bedrock/meta.llama3-1-8b-instruct-v1:0",
+    "bedrock/mistral.mistral-7b-instruct-v0:2",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -78,11 +85,20 @@ rate_limiter = InMemoryRateLimiter(
     max_bucket_size=2,
 )
 
-llm = init_chat_model(
-    MODEL,
-    temperature=0,
-    rate_limiter=rate_limiter,
-)
+if MODEL.startswith("bedrock/"):
+    llm = init_chat_model(
+        MODEL.replace("bedrock/", ""),
+        model_provider="bedrock",
+        temperature=0,
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        rate_limiter=rate_limiter,
+    )
+else:
+    llm = init_chat_model(
+        MODEL,
+        temperature=0,
+        rate_limiter=rate_limiter,
+    )
 
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
