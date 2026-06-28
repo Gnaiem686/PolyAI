@@ -6,6 +6,8 @@ import os
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
+import uuid
+import boto3
 
 from dotenv import load_dotenv
 import time
@@ -26,6 +28,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+
+s3_client = boto3.client("s3", region_name=AWS_REGION)
+
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
 
@@ -34,6 +41,13 @@ ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
+    
+    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    "bedrock/amazon.nova-micro-v1:0",
+    "bedrock/amazon.nova-lite-v1:0",
+    "bedrock/openai.gpt-oss-20b-1:0",
+    "bedrock/meta.llama3-1-8b-instruct-v1:0",
+    "bedrock/mistral.mistral-7b-instruct-v0:2",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -50,6 +64,22 @@ SYSTEM_PROMPT = (
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
 
+def upload_image_to_s3(image_b64: str) -> str:
+    image_bytes = base64.b64decode(image_b64)
+
+    chat_id = str(uuid.uuid4())
+    prediction_id = str(uuid.uuid4())
+    key = f"{chat_id}/{prediction_id}/original/image.jpg"
+
+    s3_client.put_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=key,
+        Body=image_bytes,
+        ContentType="image/jpeg",
+    )
+
+    return key
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -57,11 +87,12 @@ def detect_objects() -> str:
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
 
-    image_bytes = base64.b64decode(image_b64)
+    image_s3_key = upload_image_to_s3(image_b64)
+
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+            json={"image_s3_key": image_s3_key},
         )
         response.raise_for_status()
     return json.dumps(response.json())
@@ -78,11 +109,20 @@ rate_limiter = InMemoryRateLimiter(
     max_bucket_size=2,
 )
 
-llm = init_chat_model(
-    MODEL,
-    temperature=0,
-    rate_limiter=rate_limiter,
-)
+if MODEL.startswith("bedrock/"):
+    llm = init_chat_model(
+        MODEL.replace("bedrock/", ""),
+        model_provider="bedrock",
+        temperature=0,
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        rate_limiter=rate_limiter,
+    )
+else:
+    llm = init_chat_model(
+        MODEL,
+        temperature=0,
+        rate_limiter=rate_limiter,
+    )
 
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
