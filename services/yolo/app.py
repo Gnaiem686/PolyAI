@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from ultralytics import YOLO
 from PIL import Image
@@ -176,7 +176,7 @@ def predict(request: S3PredictRequest, db: Session = Depends(get_db)):
     except OSError:
         pass
 
-    prediction_session = save_prediction_session(db, uid, original_path, predicted_path)
+    prediction_session = save_prediction_session(db, uid, image_s3_key, predicted_s3_key)
 
     detected_labels = []
     for box in results[0].boxes:
@@ -235,14 +235,15 @@ def get_prediction_by_uid(uid: str, db=Depends(get_db)):
 
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(uid: str, db=Depends(get_db)):
-    """
-    Return the annotated (bounding-box) image for a prediction
-    """
     session_obj = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
-    if not session_obj or not os.path.exists(session_obj.predicted_image):
+    if not session_obj:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    return FileResponse(session_obj.predicted_image)
+    try:
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET, Key=session_obj.predicted_image)
+        return Response(content=obj["Body"].read(), media_type="image/jpeg")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Image not found")
 
 @app.get("/health")
 def health():
