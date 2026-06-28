@@ -6,6 +6,8 @@ import os
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
+import uuid
+import boto3
 
 from dotenv import load_dotenv
 import time
@@ -17,6 +19,11 @@ logging.basicConfig(
 )
 logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
+
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 import httpx
 from fastapi import FastAPI
@@ -57,6 +64,25 @@ SYSTEM_PROMPT = (
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
 
+def upload_image_to_s3(image_b64: str) -> str:
+    if not AWS_S3_BUCKET:
+        raise RuntimeError("AWS_S3_BUCKET environment variable is not set")
+
+    image_bytes = base64.b64decode(image_b64)
+
+    chat_id = str(uuid.uuid4())
+    prediction_id = str(uuid.uuid4())
+    image_s3_key = f"{chat_id}/{prediction_id}/original/image.jpg"
+
+    s3_client.put_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=image_s3_key,
+        Body=image_bytes,
+        ContentType="image/jpeg",
+    )
+
+    return image_s3_key
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -64,13 +90,15 @@ def detect_objects() -> str:
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
 
-    image_bytes = base64.b64decode(image_b64)
+    image_s3_key = upload_image_to_s3(image_b64)
+
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+            json={"image_s3_key": image_s3_key},
         )
         response.raise_for_status()
+
     return json.dumps(response.json())
 
 
