@@ -39,7 +39,7 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service.image }}:scout-test
 
       - name: Scan image with Docker Scout
-        uses: docker/scout-action@v1
+        uses: docker/scout-action@v1.18.2
         with:
           command: cves
           image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service.image }}:scout-test
