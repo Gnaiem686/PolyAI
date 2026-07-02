@@ -12,10 +12,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Normalize Dev SSH host
+        id: dev-ssh-host
+        env:
+          DEV_INSTANCE_IP: ${{ secrets.DEV_INSTANCE_IP }}
+        run: echo "host=${DEV_INSTANCE_IP%%:*}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to Dev instance
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.DEV_INSTANCE_IP }}
+          host: ${{ steps.dev-ssh-host.outputs.host }}
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
           script: |
@@ -60,10 +66,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Normalize Prod SSH host
+        id: prod-ssh-host
+        env:
+          PROD_INSTANCE_IP: ${{ secrets.PROD_INSTANCE_IP }}
+        run: echo "host=${PROD_INSTANCE_IP%%:*}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to Prod instance
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.PROD_INSTANCE_IP }}
+          host: ${{ steps.prod-ssh-host.outputs.host }}
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
           script: |
