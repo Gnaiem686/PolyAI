@@ -3,3 +3,4 @@ pillow
 boto3
 pytest
 moto
+numpy
