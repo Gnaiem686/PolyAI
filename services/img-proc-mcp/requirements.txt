@@ -1,4 +1,6 @@
 mcp[cli]
+fastapi
+uvicorn[standard]
 pillow
 boto3
 pytest

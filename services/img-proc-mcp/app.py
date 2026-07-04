@@ -8,8 +8,11 @@ from mcp.server.fastmcp import FastMCP
 from PIL import Image, ImageFilter, ImageOps
 import random
 import numpy as np
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 mcp = FastMCP("img-proc")
+api = FastAPI(title="Image Processing MCP HTTP API")
 
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 s3_client = boto3.client("s3")
@@ -51,71 +54,87 @@ def _upload_image_to_s3(img: Image.Image, prefix: str = "processed") -> str:
 
     return output_s3_key
 
+class BlurRequest(BaseModel):
+    input_s3_key: str
+    radius: float = 2.0
 
-@mcp.tool()
-def blur(input_s3_key: str, radius: float = 2.0) -> str:
-    """
-    Apply Gaussian blur to an image stored in S3.
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        radius: Gaussian blur radius.
+class RotateRequest(BaseModel):
+    input_s3_key: str
+    angle: float = 90.0
+    expand: bool = True
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+
+class FlipRequest(BaseModel):
+    input_s3_key: str
+    direction: str = "horizontal"
+
+
+class ResizeRequest(BaseModel):
+    input_s3_key: str
+    width: int
+    height: int
+
+
+class CropRequest(BaseModel):
+    input_s3_key: str
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
+class AddNoiseRequest(BaseModel):
+    input_s3_key: str
+    amount: float = 0.05
+
+############################################----- blur -----###################################################
+def _blur_image(input_s3_key: str, radius: float = 2.0) -> dict:
     img = _download_image_from_s3(input_s3_key)
     blurred_img = img.filter(ImageFilter.GaussianBlur(radius))
     output_s3_key = _upload_image_to_s3(blurred_img, prefix="processed/blur")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "blur",
-            "radius": radius,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "blur",
+        "radius": radius,
+    }
 
 @mcp.tool()
-def rotate(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> str:
-    """
-    Rotate an image stored in S3.
+def blur(input_s3_key: str, radius: float = 2.0) -> str:
+    """Apply Gaussian blur to an image stored in S3."""
+    return json.dumps(_blur_image(input_s3_key, radius))
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        angle: Rotation angle in degrees.
-        expand: If True, expand the output image size to fit the rotated image.
+@api.post("/blur")
+def blur_endpoint(request: BlurRequest) -> dict:
+    return _blur_image(request.input_s3_key, request.radius)
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+############################################----- rotate -----###################################################
+def _rotate_image(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> dict:
     img = _download_image_from_s3(input_s3_key)
     rotated_img = img.rotate(angle, expand=expand)
     output_s3_key = _upload_image_to_s3(rotated_img, prefix="processed/rotate")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "rotate",
-            "angle": angle,
-            "expand": expand,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "rotate",
+        "angle": angle,
+        "expand": expand,
+    }
 
 @mcp.tool()
-def flip(input_s3_key: str, direction: str = "horizontal") -> str:
-    """
-    Flip an image stored in S3.
+def rotate(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> str:
+    """Rotate an image stored in S3."""
+    return json.dumps(_rotate_image(input_s3_key, angle, expand))
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        direction: "horizontal" or "vertical".
+@api.post("/rotate")
+def rotate_endpoint(request: RotateRequest) -> dict:
+    return _rotate_image(request.input_s3_key, request.angle, request.expand)
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+############################################----- flip -----###################################################
+def _flip_image(input_s3_key: str, direction: str = "horizontal") -> dict:
     img = _download_image_from_s3(input_s3_key)
 
     normalized_direction = direction.lower().strip()
@@ -129,61 +148,50 @@ def flip(input_s3_key: str, direction: str = "horizontal") -> str:
 
     output_s3_key = _upload_image_to_s3(flipped_img, prefix="processed/flip")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "flip",
-            "direction": normalized_direction,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "flip",
+        "direction": normalized_direction,
+    }
 
 @mcp.tool()
-def resize(input_s3_key: str, width: int, height: int) -> str:
-    """
-    Resize an image stored in S3.
+def flip(input_s3_key: str, direction: str = "horizontal") -> str:
+    """Flip an image stored in S3."""
+    return json.dumps(_flip_image(input_s3_key, direction))
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        width: Target width in pixels.
-        height: Target height in pixels.
+@api.post("/flip")
+def flip_endpoint(request: FlipRequest) -> dict:
+    return _flip_image(request.input_s3_key, request.direction)
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+############################################----- resize -----###################################################
+def _resize_image(input_s3_key: str, width: int, height: int) -> dict:
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive integers")
 
     img = _download_image_from_s3(input_s3_key)
     resized_img = img.resize((width, height))
-
     output_s3_key = _upload_image_to_s3(resized_img, prefix="processed/resize")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "resize",
-            "width": width,
-            "height": height,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "resize",
+        "width": width,
+        "height": height,
+    }
 
 @mcp.tool()
-def crop(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> str:
-    """
-    Crop a region from an image stored in S3.
+def resize(input_s3_key: str, width: int, height: int) -> str:
+    """Resize an image stored in S3."""
+    return json.dumps(_resize_image(input_s3_key, width, height))
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        left: Left x-coordinate of the crop box.
-        top: Top y-coordinate of the crop box.
-        right: Right x-coordinate of the crop box.
-        bottom: Bottom y-coordinate of the crop box.
+@api.post("/resize")
+def resize_endpoint(request: ResizeRequest) -> dict:
+    return _resize_image(request.input_s3_key, request.width, request.height)
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+############################################----- crop -----###################################################
+def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> dict:
     if left < 0 or top < 0:
         raise ValueError("left and top must be non-negative")
 
@@ -191,40 +199,41 @@ def crop(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> str
         raise ValueError("right must be greater than left and bottom must be greater than top")
 
     img = _download_image_from_s3(input_s3_key)
-
     width, height = img.size
 
     if right > width or bottom > height:
         raise ValueError("crop box must be inside image bounds")
 
     cropped_img = img.crop((left, top, right, bottom))
-
     output_s3_key = _upload_image_to_s3(cropped_img, prefix="processed/crop")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "crop",
-            "left": left,
-            "top": top,
-            "right": right,
-            "bottom": bottom,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "crop",
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+    }
 
 @mcp.tool()
-def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
-    """
-    Add salt-and-pepper noise to an image stored in S3.
+def crop(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> str:
+    """Crop a region from an image stored in S3."""
+    return json.dumps(_crop_image(input_s3_key, left, top, right, bottom))
 
-    Args:
-        input_s3_key: S3 key of the input image.
-        amount: Fraction of pixels to modify. Must be between 0 and 1.
+@api.post("/crop")
+def crop_endpoint(request: CropRequest) -> dict:
+    return _crop_image(
+        request.input_s3_key,
+        request.left,
+        request.top,
+        request.right,
+        request.bottom,
+    )
 
-    Returns:
-        JSON string with output_s3_key.
-    """
+############################################----- add noise -----###################################################
+def _add_noise_to_image(input_s3_key: str, amount: float = 0.05) -> dict:
     if amount < 0 or amount > 1:
         raise ValueError("amount must be between 0 and 1")
 
@@ -240,21 +249,33 @@ def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
         y = random.randint(0, height - 1)
 
         if random.random() < 0.5:
-            arr[y, x] = [0, 0, 0]        # pepper
+            arr[y, x] = [0, 0, 0]
         else:
-            arr[y, x] = [255, 255, 255]  # salt
+            arr[y, x] = [255, 255, 255]
 
     noisy_img = Image.fromarray(arr.astype("uint8"), "RGB")
     output_s3_key = _upload_image_to_s3(noisy_img, prefix="processed/noise")
 
-    return json.dumps(
-        {
-            "input_s3_key": input_s3_key,
-            "output_s3_key": output_s3_key,
-            "operation": "add_noise",
-            "amount": amount,
-        }
-    )
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "add_noise",
+        "amount": amount,
+    }
+
+@mcp.tool()
+def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
+    """Add salt-and-pepper noise to an image stored in S3."""
+    return json.dumps(_add_noise_to_image(input_s3_key, amount))
+
+@api.post("/add-noise")
+def add_noise_endpoint(request: AddNoiseRequest) -> dict:
+    return _add_noise_to_image(request.input_s3_key, request.amount)
+
+############################################----- helth -----###################################################
+@api.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     mcp.run()

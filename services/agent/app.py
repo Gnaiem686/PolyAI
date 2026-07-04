@@ -8,6 +8,9 @@ from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
 import uuid
 import boto3
+import ast
+
+from PIL import Image
 
 from dotenv import load_dotenv
 import time
@@ -34,6 +37,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
+IMG_PROC_MCP_URL = os.getenv("IMG_PROC_MCP_URL", "http://localhost:8100")
 MODEL = os.environ.get("MODEL")
 
 # Text-only models
@@ -58,8 +62,11 @@ if MODEL not in ALLOWED_MODELS:
     )
 
 SYSTEM_PROMPT = (
-    "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "You are an AI vision assistant. You help users understand, analyze, and edit images. "
+    "Use the available tools whenever the user asks to detect objects or modify an image. "
+    "Never invent, rewrite, copy, or mention image URLs. "
+    "Never copy old assistant messages as the answer. "
+    "If the user asks for a new image edit, call the correct image tool."
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
@@ -83,6 +90,184 @@ def upload_image_to_s3(image_b64: str) -> str:
 
     return image_s3_key
 
+def download_image_from_s3(s3_key: str) -> Image.Image:
+    if not AWS_S3_BUCKET:
+        raise RuntimeError("AWS_S3_BUCKET environment variable is not set")
+
+    response = s3_client.get_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=s3_key,
+    )
+
+    image_bytes = response["Body"].read()
+    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+
+def upload_pil_image_to_s3(img: Image.Image, prefix: str = "agent-results") -> str:
+    if not AWS_S3_BUCKET:
+        raise RuntimeError("AWS_S3_BUCKET environment variable is not set")
+
+    output_s3_key = f"{prefix}/{uuid.uuid4()}.png"
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    s3_client.put_object(
+        Bucket=AWS_S3_BUCKET,
+        Key=output_s3_key,
+        Body=buffer.getvalue(),
+        ContentType="image/png",
+    )
+
+    return output_s3_key
+
+
+def parse_yolo_box(box_value) -> tuple[int, int, int, int]:
+    if isinstance(box_value, str):
+        box = ast.literal_eval(box_value)
+    else:
+        box = box_value
+
+    if len(box) != 4:
+        raise ValueError("YOLO box must contain four values")
+
+    left, top, right, bottom = box
+
+    return (
+        max(0, int(left)),
+        max(0, int(top)),
+        max(0, int(right)),
+        max(0, int(bottom)),
+    )
+
+
+def select_detection(detection_objects: list[dict], label: str, position: str = "first") -> dict:
+    target_label = label.lower().strip()
+    normalized_position = position.lower().strip()
+
+    matches = [
+        obj for obj in detection_objects
+        if obj.get("label", "").lower().strip() == target_label
+    ]
+
+    if not matches:
+        raise ValueError(f"No detected object with label '{label}' was found")
+
+    def center_x(obj: dict) -> float:
+        left, _, right, _ = parse_yolo_box(obj["box"])
+        return (left + right) / 2
+
+    if normalized_position in ("first", "any"):
+        return matches[0]
+
+    if normalized_position in ("left", "leftmost"):
+        return sorted(matches, key=center_x)[0]
+
+    if normalized_position in ("right", "rightmost"):
+        return sorted(matches, key=center_x, reverse=True)[0]
+
+    if normalized_position in ("second from right", "second right"):
+        sorted_matches = sorted(matches, key=center_x, reverse=True)
+        if len(sorted_matches) < 2:
+            raise ValueError(f"Only found {len(sorted_matches)} object(s) with label '{label}'")
+        return sorted_matches[1]
+
+    if normalized_position in ("second from left", "second left"):
+        sorted_matches = sorted(matches, key=center_x)
+        if len(sorted_matches) < 2:
+            raise ValueError(f"Only found {len(sorted_matches)} object(s) with label '{label}'")
+        return sorted_matches[1]
+
+    raise ValueError(
+        "Unsupported position. Use first, leftmost, rightmost, second from right, or second from left."
+    )
+
+
+def paste_processed_region(
+    original_img: Image.Image,
+    processed_region: Image.Image,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+) -> Image.Image:
+    box_width = right - left
+    box_height = bottom - top
+
+    processed_region = processed_region.convert("RGB")
+    processed_region = processed_region.resize((box_width, box_height))
+
+    result_img = original_img.copy()
+    result_img.paste(processed_region, (left, top))
+
+    return result_img
+
+
+def clamp_box_to_image(left: int, top: int, right: int, bottom: int, img: Image.Image) -> tuple[int, int, int, int]:
+    width, height = img.size
+    left = max(0, min(left, width - 1))
+    right = max(left + 1, min(right, width))
+    top = max(0, min(top, height - 1))
+    bottom = max(top + 1, min(bottom, height))
+    return left, top, right, bottom
+
+
+def get_selected_object_crop(
+    label: str,
+    position: str = "first",
+) -> tuple[str, Image.Image, Image.Image, tuple[int, int, int, int], dict]:
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        raise RuntimeError("No image was provided by the user.")
+
+    original_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        predict_response = client.post(
+            f"{YOLO_SERVICE_URL}/predict",
+            json={"image_s3_key": original_s3_key},
+        )
+        predict_response.raise_for_status()
+        predict_result = predict_response.json()
+
+        prediction_uid = predict_result["prediction_uid"]
+
+        details_response = client.get(f"{YOLO_SERVICE_URL}/prediction/{prediction_uid}")
+        details_response.raise_for_status()
+        prediction_details = details_response.json()
+
+    detection_objects = prediction_details.get("detection_objects", [])
+    selected_detection = select_detection(detection_objects, label=label, position=position)
+
+    left, top, right, bottom = parse_yolo_box(selected_detection["box"])
+
+    original_img = download_image_from_s3(original_s3_key)
+    left, top, right, bottom = clamp_box_to_image(left, top, right, bottom, original_img)
+
+    object_crop = original_img.crop((left, top, right, bottom))
+
+    return original_s3_key, original_img, object_crop, (left, top, right, bottom), selected_detection
+
+
+def create_presigned_url(s3_key: str, expires_in: int = 3600) -> str:
+    if not AWS_S3_BUCKET:
+        raise RuntimeError("AWS_S3_BUCKET environment variable is not set")
+
+    return s3_client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": AWS_S3_BUCKET,
+            "Key": s3_key,
+        },
+        ExpiresIn=expires_in,
+    )
+
+
+def build_image_response(message: str, image_url: str) -> str:
+    return f"{message}\n\n<img src=\"{image_url}\" alt=\"Processed image\">"
+
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -101,10 +286,378 @@ def detect_objects() -> str:
 
     return json.dumps(response.json())
 
+@tool
+def blur_image(radius: float = 2.0) -> str:
+    """Blur the image provided by the user. Returns a temporary URL to the processed image."""
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/blur",
+            json={
+                "input_s3_key": input_s3_key,
+                "radius": radius,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I blurred the image with radius {radius}.",
+        "image_url": image_url,
+    })
+
+@tool
+def rotate_image(angle: float = 90.0, expand: bool = True) -> str:
+    """
+    Rotate the entire image provided by the user.
+
+    Args:
+        angle: Rotation angle in degrees.
+        expand: If True, expand the output image size to fit the rotated image.
+
+    Returns an HTML image tag with the rotated image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/rotate",
+            json={
+                "input_s3_key": input_s3_key,
+                "angle": angle,
+                "expand": expand,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I rotated the image by {angle} degrees.",
+        "image_url": image_url,
+    })
+
+@tool
+def flip_image(direction: str = "horizontal") -> str:
+    """
+    Flip the entire image provided by the user.
+
+    Args:
+        direction: Flip direction. Use "horizontal" or "vertical".
+
+    Returns a temporary URL to the flipped image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    direction = direction.lower().strip()
+    if direction not in ("horizontal", "vertical"):
+        return json.dumps({"error": "direction must be 'horizontal' or 'vertical'"})
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/flip",
+            json={
+                "input_s3_key": input_s3_key,
+                "direction": direction,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I flipped the image {direction}ly.",
+        "image_url": image_url,
+    })
+
+@tool
+def resize_image(width: int, height: int) -> str:
+    """
+    Resize the entire image provided by the user.
+
+    Args:
+        width: New image width in pixels.
+        height: New image height in pixels.
+
+    Returns a temporary URL to the resized image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    if width <= 0 or height <= 0:
+        return json.dumps({"error": "width and height must be positive integers"})
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/resize",
+            json={
+                "input_s3_key": input_s3_key,
+                "width": width,
+                "height": height,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I resized the image to {width}x{height}.",
+        "image_url": image_url,
+    })
+
+@tool
+def crop_image(left: int, top: int, right: int, bottom: int) -> str:
+    """
+    Crop the entire image using pixel coordinates.
+
+    Args:
+        left: Left x-coordinate of the crop box.
+        top: Top y-coordinate of the crop box.
+        right: Right x-coordinate of the crop box.
+        bottom: Bottom y-coordinate of the crop box.
+
+    Returns a temporary URL to the cropped image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    if right <= left or bottom <= top:
+        return json.dumps({
+            "error": "Invalid crop box. right must be greater than left, and bottom must be greater than top."
+        })
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/crop",
+            json={
+                "input_s3_key": input_s3_key,
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I cropped the image using box ({left}, {top}, {right}, {bottom}).",
+        "image_url": image_url,
+    })
+
+@tool
+def add_noise_image(amount: float = 0.05) -> str:
+    """
+    Add salt-and-pepper noise to the entire image provided by the user.
+
+    Args:
+        amount: Fraction of pixels to modify. Example: 0.05.
+
+    Returns a temporary URL to the noisy image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    if amount <= 0 or amount > 1:
+        return json.dumps({"error": "amount must be greater than 0 and less than or equal to 1"})
+
+    input_s3_key = upload_image_to_s3(image_b64)
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{IMG_PROC_MCP_URL}/add-noise",
+            json={
+                "input_s3_key": input_s3_key,
+                "amount": amount,
+            },
+        )
+        response.raise_for_status()
+
+    result = response.json()
+    output_s3_key = result["output_s3_key"]
+    image_url = create_presigned_url(output_s3_key)
+
+    return json.dumps({
+        "message": f"I added salt-and-pepper noise to the image with amount {amount}.",
+        "image_url": image_url,
+    })
+
+@tool
+def blur_detected_object(label: str, position: str = "first", radius: float = 2.0) -> str:
+    """
+    Blur a detected object in the image provided by the user.
+
+    Args:
+        label: Object label to edit, for example "dog", "car", "person".
+        position: Which matching object to edit. Supports: first, leftmost, rightmost,
+                  second from right, second from left.
+        radius: Gaussian blur radius.
+
+    Returns an HTML image tag with the final full image, where only the selected object is blurred.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(label=label, position=position)
+    crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
+
+    with httpx.Client(timeout=60.0) as client:
+        blur_response = client.post(
+            f"{IMG_PROC_MCP_URL}/blur",
+            json={
+                "input_s3_key": crop_s3_key,
+                "radius": radius,
+            },
+        )
+        blur_response.raise_for_status()
+        blur_result = blur_response.json()
+
+    processed_crop_s3_key = blur_result["output_s3_key"]
+    processed_crop = download_image_from_s3(processed_crop_s3_key)
+
+    final_img = paste_processed_region(
+        original_img=original_img,
+        processed_region=processed_crop,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/blur-detected-object")
+    final_image_url = create_presigned_url(final_s3_key)
+
+    return json.dumps({
+        "message": f"I blurred the {position} {label} in the image.",
+        "image_url": final_image_url,
+    })
+
+@tool
+def crop_detected_object(label: str, position: str = "first") -> str:
+    """
+    Crop a detected object from the image provided by the user.
+
+    Args:
+        label: Object label to crop, for example "dog", "car", "person".
+        position: Which matching object to crop. Supports: first, leftmost, rightmost,
+                  second from right, second from left.
+
+    Returns a temporary URL to the cropped detected object.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    _, _, object_crop, _, _ = get_selected_object_crop(label=label, position=position)
+
+    crop_s3_key = upload_pil_image_to_s3(
+        object_crop,
+        prefix="agent-results/crop-detected-object",
+    )
+    crop_image_url = create_presigned_url(crop_s3_key)
+
+    return json.dumps({
+        "message": f"I cropped the {position} {label} from the image.",
+        "image_url": crop_image_url,
+    })
+
+@tool
+def add_noise_to_detected_object(label: str, position: str = "first", amount: float = 0.05) -> str:
+    """
+    Add salt-and-pepper noise to a detected object in the image provided by the user.
+
+    Args:
+        label: Object label to edit, for example "dog", "car", "person".
+        position: Which matching object to edit. Supports: first, leftmost, rightmost,
+                  second from right, second from left.
+        amount: Fraction of pixels to modify with salt-and-pepper noise. Example: 0.05.
+
+    Returns an HTML image tag with the final full image, where only the selected object has noise.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        return json.dumps({"error": "No image was provided by the user."})
+
+    _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(label=label, position=position)
+    crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
+
+    with httpx.Client(timeout=60.0) as client:
+        noise_response = client.post(
+            f"{IMG_PROC_MCP_URL}/add-noise",
+            json={
+                "input_s3_key": crop_s3_key,
+                "amount": amount,
+            },
+        )
+        noise_response.raise_for_status()
+        noise_result = noise_response.json()
+
+    processed_crop_s3_key = noise_result["output_s3_key"]
+    processed_crop = download_image_from_s3(processed_crop_s3_key)
+
+    final_img = paste_processed_region(
+        original_img=original_img,
+        processed_region=processed_crop,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/noise-detected-object")
+    final_image_url = create_presigned_url(final_s3_key)
+
+    return json.dumps({
+        "message": f"I added salt-and-pepper noise to the {position} {label} in the image.",
+        "image_url": final_image_url,
+    })
+
 
 # Registry: map tool name -> tool function
 TOOLS = {
-    detect_objects.name: detect_objects
+    detect_objects.name: detect_objects,
+    blur_image.name: blur_image,
+    rotate_image.name: rotate_image,
+    flip_image.name: flip_image,
+    resize_image.name: resize_image,
+    crop_image.name: crop_image,
+    add_noise_image.name: add_noise_image,
+    crop_detected_object.name: crop_detected_object,
+    blur_detected_object.name: blur_detected_object,
+    add_noise_to_detected_object.name: add_noise_to_detected_object,
 }
 
 rate_limiter = InMemoryRateLimiter(
@@ -173,6 +726,21 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
                     if isinstance(parsed, dict):
                         prediction_id = parsed.get("uid") or parsed.get("prediction_uid") or prediction_id
                         annotated_image = parsed.get("annotated_image", annotated_image)
+
+                        image_url = parsed.get("image_url")
+                        if isinstance(image_url, str) and image_url:
+                            return {
+                                "response": build_image_response(
+                                    parsed.get("message", ""),
+                                    image_url,
+                                ),
+                                "prediction_id": prediction_id,
+                                "annotated_image": annotated_image,
+                                "agent_loop_time_s": 0.0,
+                                "iterations": iterations,
+                                "tools_called": tools_called,
+                                "context_limit_exceeded": context_limit_exceeded,
+                            }
                 except Exception:
                     pass
 
@@ -231,19 +799,36 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    lc_messages = []
+    latest_user_msg = None
     latest_image = None
 
+    # Find the latest user message and latest uploaded image
     for msg in request.messages:
         if msg.role == "user":
+            latest_user_msg = msg
             if msg.image_base64:
-                latest_image = msg.image_base64          # saved for detect_objects tool
-                content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
-            else:
-                content = msg.content
-            lc_messages.append(HumanMessage(content=content))
-        else:
-            lc_messages.append(AIMessage(content=msg.content))
+                latest_image = msg.image_base64
+
+    if latest_user_msg is None:
+        return ChatResponse(
+            response="No user message was provided.",
+            prediction_id=None,
+            annotated_image=None,
+            agent_loop_time_s=0.0,
+            iterations=0,
+            tools_called=[],
+            context_limit_exceeded=False,
+        )
+
+    content = latest_user_msg.content
+
+    if latest_image:
+        content += (
+            "\n[An image was uploaded with this message. "
+            "Use the available tools to analyze or edit this uploaded image according to the user instructions.]"
+        )
+
+    lc_messages = [HumanMessage(content=content)]
 
     token = _current_image_b64.set(latest_image)
     try:
