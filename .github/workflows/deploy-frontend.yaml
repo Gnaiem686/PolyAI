@@ -37,6 +37,8 @@ jobs:
           context: ./services/frontend
           push: true
           tags: gnaiem686/polyai-frontend:${{ steps.vars.outputs.image_tag }}
+          build-args: |
+            NEXT_PUBLIC_AGENT_URL=${{ github.ref == 'refs/heads/main' && format('http://{0}:8000', secrets.PROD_INSTANCE_IP) || format('http://{0}:8000', secrets.DEV_INSTANCE_IP) }}
 
   deploy-dev:
     if: github.ref == 'refs/heads/dev'
