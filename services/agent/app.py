@@ -11,7 +11,7 @@ import boto3
 import ast
 
 from PIL import Image
-
+from prometheus_fastapi_instrumentator import Instrumentator
 from dotenv import load_dotenv
 import time
 load_dotenv()
@@ -776,6 +776,7 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+Instrumentator().instrument(app).expose(app)
 
 class ChatMessage(BaseModel):
     role: str                           # "user" or "assistant"

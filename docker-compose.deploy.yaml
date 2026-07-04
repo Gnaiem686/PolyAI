@@ -1,0 +1,98 @@
+services:
+  yolo:
+    image: gnaiem686/polyai-yolo:${YOLO_IMAGE_TAG}
+    container_name: polyai-yolo
+    ports:
+      - "8080:8080"
+    environment:
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.5}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    networks:
+      - polyai-net
+
+  agent:
+    image: gnaiem686/polyai-agent:${AGENT_IMAGE_TAG}
+    container_name: polyai-agent
+    ports:
+      - "8000:8000"
+    environment:
+      - YOLO_SERVICE_URL=http://yolo:8080
+      - IMG_PROC_MCP_URL=http://img-proc-mcp:8100
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - MODEL=${MODEL}
+    depends_on:
+      - yolo
+      - img-proc-mcp
+    networks:
+      - polyai-net
+
+  frontend:
+    image: gnaiem686/polyai-frontend:${FRONTEND_IMAGE_TAG}
+    container_name: polyai-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - agent
+    networks:
+      - polyai-net
+
+  img-proc-mcp:
+    image: gnaiem686/polyai-img-proc-mcp:${IMG_PROC_MCP_IMAGE_TAG}
+    container_name: polyai-img-proc-mcp
+    ports:
+      - "8100:8100"
+    environment:
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    networks:
+      - polyai-net
+
+  prometheus:
+    image: prom/prometheus
+    container_name: polyai-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    depends_on:
+      - yolo
+      - agent
+      - img-proc-mcp
+      - node-exporter
+    networks:
+      - monitoring-net
+      - polyai-net
+
+  grafana:
+    image: grafana/grafana
+    container_name: polyai-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring-net
+
+  node-exporter:
+    image: prom/node-exporter
+    container_name: polyai-node-exporter
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring-net
+
+volumes:
+  grafana-data:
+  prometheus-data:
+
+networks:
+  polyai-net:
+  monitoring-net:
