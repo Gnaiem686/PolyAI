@@ -1,0 +1,113 @@
+name: Deploy Yolo
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "services/yolo/**"
+      - "docker-compose.deploy.yaml"
+      - ".github/workflows/deploy-yolo.yaml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: gnaiem686
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push YOLO image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/yolo
+          push: true
+          tags: gnaiem686/polyai-yolo:${{ steps.vars.outputs.image_tag }}
+
+  deploy-dev:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy YOLO to Dev instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/PolyAI
+
+            git fetch origin
+            git checkout dev
+            git reset --hard origin/dev
+
+            touch .env.deploy
+
+            if grep -q "^YOLO_IMAGE_TAG=" .env.deploy; then
+              sed -i "s|^YOLO_IMAGE_TAG=.*|YOLO_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            else
+              echo "YOLO_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+            fi
+
+            docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull yolo
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d yolo
+
+            docker image prune -f
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy YOLO to Prod instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/PolyAI
+
+            git fetch origin
+            git checkout main
+            git reset --hard origin/main
+
+            touch .env.deploy
+
+            if grep -q "^YOLO_IMAGE_TAG=" .env.deploy; then
+              sed -i "s|^YOLO_IMAGE_TAG=.*|YOLO_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            else
+              echo "YOLO_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+            fi
+
+            docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull yolo
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d yolo
+
+            docker image prune -f
+            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps

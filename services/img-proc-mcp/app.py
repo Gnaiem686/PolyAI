@@ -10,9 +10,11 @@ import random
 import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
+from prometheus_fastapi_instrumentator import Instrumentator
 
 mcp = FastMCP("img-proc")
 api = FastAPI(title="Image Processing MCP HTTP API")
+Instrumentator().instrument(api).expose(api)
 
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 s3_client = boto3.client("s3")
