@@ -8,13 +8,11 @@ from mcp.server.fastmcp import FastMCP
 from PIL import Image, ImageFilter, ImageOps
 import random
 import numpy as np
-from fastapi import FastAPI
-from pydantic import BaseModel
-from prometheus_fastapi_instrumentator import Instrumentator
+from dotenv import load_dotenv
 
-mcp = FastMCP("img-proc")
-api = FastAPI(title="Image Processing MCP HTTP API")
-Instrumentator().instrument(api).expose(api)
+load_dotenv()
+
+mcp = FastMCP("img-proc", host="0.0.0.0", port=8100)
 
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 s3_client = boto3.client("s3")
@@ -56,40 +54,6 @@ def _upload_image_to_s3(img: Image.Image, prefix: str = "processed") -> str:
 
     return output_s3_key
 
-class BlurRequest(BaseModel):
-    input_s3_key: str
-    radius: float = 2.0
-
-
-class RotateRequest(BaseModel):
-    input_s3_key: str
-    angle: float = 90.0
-    expand: bool = True
-
-
-class FlipRequest(BaseModel):
-    input_s3_key: str
-    direction: str = "horizontal"
-
-
-class ResizeRequest(BaseModel):
-    input_s3_key: str
-    width: int
-    height: int
-
-
-class CropRequest(BaseModel):
-    input_s3_key: str
-    left: int
-    top: int
-    right: int
-    bottom: int
-
-
-class AddNoiseRequest(BaseModel):
-    input_s3_key: str
-    amount: float = 0.05
-
 ############################################----- blur -----###################################################
 def _blur_image(input_s3_key: str, radius: float = 2.0) -> dict:
     img = _download_image_from_s3(input_s3_key)
@@ -107,10 +71,6 @@ def _blur_image(input_s3_key: str, radius: float = 2.0) -> dict:
 def blur(input_s3_key: str, radius: float = 2.0) -> str:
     """Apply Gaussian blur to an image stored in S3."""
     return json.dumps(_blur_image(input_s3_key, radius))
-
-@api.post("/blur")
-def blur_endpoint(request: BlurRequest) -> dict:
-    return _blur_image(request.input_s3_key, request.radius)
 
 ############################################----- rotate -----###################################################
 def _rotate_image(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> dict:
@@ -130,10 +90,6 @@ def _rotate_image(input_s3_key: str, angle: float = 90.0, expand: bool = True) -
 def rotate(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> str:
     """Rotate an image stored in S3."""
     return json.dumps(_rotate_image(input_s3_key, angle, expand))
-
-@api.post("/rotate")
-def rotate_endpoint(request: RotateRequest) -> dict:
-    return _rotate_image(request.input_s3_key, request.angle, request.expand)
 
 ############################################----- flip -----###################################################
 def _flip_image(input_s3_key: str, direction: str = "horizontal") -> dict:
@@ -162,10 +118,6 @@ def flip(input_s3_key: str, direction: str = "horizontal") -> str:
     """Flip an image stored in S3."""
     return json.dumps(_flip_image(input_s3_key, direction))
 
-@api.post("/flip")
-def flip_endpoint(request: FlipRequest) -> dict:
-    return _flip_image(request.input_s3_key, request.direction)
-
 ############################################----- resize -----###################################################
 def _resize_image(input_s3_key: str, width: int, height: int) -> dict:
     if width <= 0 or height <= 0:
@@ -187,10 +139,6 @@ def _resize_image(input_s3_key: str, width: int, height: int) -> dict:
 def resize(input_s3_key: str, width: int, height: int) -> str:
     """Resize an image stored in S3."""
     return json.dumps(_resize_image(input_s3_key, width, height))
-
-@api.post("/resize")
-def resize_endpoint(request: ResizeRequest) -> dict:
-    return _resize_image(request.input_s3_key, request.width, request.height)
 
 ############################################----- crop -----###################################################
 def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> dict:
@@ -223,16 +171,6 @@ def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int)
 def crop(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> str:
     """Crop a region from an image stored in S3."""
     return json.dumps(_crop_image(input_s3_key, left, top, right, bottom))
-
-@api.post("/crop")
-def crop_endpoint(request: CropRequest) -> dict:
-    return _crop_image(
-        request.input_s3_key,
-        request.left,
-        request.top,
-        request.right,
-        request.bottom,
-    )
 
 ############################################----- add noise -----###################################################
 def _add_noise_to_image(input_s3_key: str, amount: float = 0.05) -> dict:
@@ -270,14 +208,6 @@ def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
     """Add salt-and-pepper noise to an image stored in S3."""
     return json.dumps(_add_noise_to_image(input_s3_key, amount))
 
-@api.post("/add-noise")
-def add_noise_endpoint(request: AddNoiseRequest) -> dict:
-    return _add_noise_to_image(request.input_s3_key, request.amount)
-
-############################################----- helth -----###################################################
-@api.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http")
