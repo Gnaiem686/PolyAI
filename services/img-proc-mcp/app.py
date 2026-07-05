@@ -210,4 +210,7 @@ def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    try:
+        mcp.run(transport="streamable-http")
+    except KeyboardInterrupt:
+        print("MCP server stopped.")
