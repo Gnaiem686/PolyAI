@@ -23,7 +23,7 @@ services:
       - "8000:8000"
     environment:
       - YOLO_SERVICE_URL=http://yolo:8080
-      - IMG_PROC_MCP_URL=http://img-proc-mcp:8100
+      - IMG_PROC_MCP_URL=http://img-proc-mcp:8100/mcp
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
