@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 from langchain_core.messages import AIMessage, ToolMessage
+from fastapi.testclient import TestClient
 
 os.environ.setdefault("MODEL", "google_genai:gemini-2.5-flash")
 os.environ.setdefault("GOOGLE_API_KEY", "fake-test-key")
@@ -12,6 +13,21 @@ os.environ.setdefault("YOLO_SERVICE_URL", "http://localhost:8080")
 import app as agent_app
 from app import run_agent
 
+@pytest.fixture(autouse=True)
+def clear_image_session_state():
+    agent_app.LATEST_IMAGE_BY_SESSION.clear()
+
+    image_token = agent_app._current_image_b64.set(None)
+    session_token = agent_app._current_session_id.set(None)
+    s3_key_token = agent_app._current_image_s3_key.set(None)
+
+    yield
+
+    agent_app._current_image_b64.reset(image_token)
+    agent_app._current_session_id.reset(session_token)
+    agent_app._current_image_s3_key.reset(s3_key_token)
+
+    agent_app.LATEST_IMAGE_BY_SESSION.clear()
 
 def test_run_agent_returns_plain_response_without_tools():
     fake_llm = MagicMock()
@@ -128,6 +144,46 @@ def test_get_selected_object_crop_clamps_bbox_and_returns_crop():
         agent_app._current_image_b64.reset(token)
 
 
+def test_get_selected_object_crop_uses_pil_crop_not_mcp():
+    token = agent_app._current_image_b64.set("fake-image")
+    try:
+        original_img = Image.new("RGB", (100, 100), color="red")
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        fake_client = MagicMock()
+        fake_client.__enter__.return_value = fake_client
+        fake_client.__exit__.return_value = None
+        fake_client.post.return_value = FakeResponse({"prediction_uid": "uid-1"})
+        fake_client.get.return_value = FakeResponse({
+            "detection_objects": [{"label": "chair", "box": (10, 20, 40, 60)}]
+        })
+
+        with patch("app.upload_image_to_s3", return_value="s3-key"), \
+             patch("app.download_image_from_s3", return_value=original_img), \
+             patch("app.httpx.Client", return_value=fake_client), \
+             patch("app.call_mcp_tool") as mock_call_mcp:
+            _, _, object_crop, bbox, selected_detection = agent_app.get_selected_object_crop(
+                label="chair",
+                position="first",
+            )
+
+        mock_call_mcp.assert_not_called()
+        assert object_crop.size == (30, 40)
+        assert bbox == (10, 20, 40, 60)
+        assert selected_detection["box"] == (10, 20, 40, 60)
+    finally:
+        agent_app._current_image_b64.reset(token)
+
+
 def test_parse_yolo_box_and_selection_helpers():
     assert agent_app.parse_yolo_box("(1, 2, 3, 4)") == (1, 2, 3, 4)
     with pytest.raises(ValueError):
@@ -180,7 +236,7 @@ def test_image_tools_return_error_without_image(tool_name, arguments):
     tool = getattr(agent_app, tool_name)
     result = tool.invoke(arguments)
 
-    assert json.loads(result)["error"] == "No image was provided by the user."
+    assert json.loads(result)["error"] == "No image was provided and there is no previous processed image in this chat."
 
 
 def test_run_agent_handles_list_content():
@@ -204,12 +260,12 @@ def test_run_agent_handles_list_content():
     ],
 )
 def test_image_tool_validation_errors(tool_name, arguments, expected_error):
-    token = agent_app._current_image_b64.set("fake-image")
+    token = agent_app._current_image_s3_key.set("test/original/image.jpg")
     try:
         tool = getattr(agent_app, tool_name)
         result = tool.invoke(arguments)
     finally:
-        agent_app._current_image_b64.reset(token)
+        agent_app._current_image_s3_key.reset(token)
 
     assert json.loads(result)["error"] == expected_error
 
@@ -221,7 +277,7 @@ def test_build_image_response_formats_html():
 
 
 def test_chat_sets_image_context_and_appends_instruction():
-    from fastapi.testclient import TestClient
+   
 
     client = TestClient(agent_app.app)
 
@@ -240,29 +296,46 @@ def test_chat_sets_image_context_and_appends_instruction():
             "context_limit_exceeded": False,
         }
 
-    with patch("app.run_agent", side_effect=fake_run_agent):
+    with patch("app.upload_image_to_s3", return_value="test/original/image.jpg"), \
+         patch("app.run_agent", side_effect=fake_run_agent):
         response = client.post(
             "/chat",
             json={
+                "session_id": "test-session",
                 "messages": [
                     {
                         "role": "user",
                         "content": "describe this",
                         "image_base64": "image-data",
                     }
-                ]
+                ],
             },
         )
 
     assert response.status_code == 200
     assert response.json()["response"] == "ok"
+    assert response.json()["session_id"] == "test-session"
 
 
 def test_chat_returns_no_user_message_error():
-    from fastapi.testclient import TestClient
+    
 
     client = TestClient(agent_app.app)
     response = client.post("/chat", json={"messages": []})
 
     assert response.status_code == 200
     assert response.json()["response"] == "No user message was provided."
+
+def test_get_current_image_s3_key_reuses_session_image_without_upload():
+    agent_app.LATEST_IMAGE_BY_SESSION["session-1"] = "agent-results/latest.png"
+
+    session_token = agent_app._current_session_id.set("session-1")
+    image_token = agent_app._current_image_b64.set(None)
+    s3_key_token = agent_app._current_image_s3_key.set(None)
+
+    try:
+        assert agent_app.get_current_image_s3_key() == "agent-results/latest.png"
+    finally:
+        agent_app._current_session_id.reset(session_token)
+        agent_app._current_image_b64.reset(image_token)
+        agent_app._current_image_s3_key.reset(s3_key_token)

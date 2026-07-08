@@ -8,6 +8,7 @@ on:
     paths:
       - "services/frontend/**"
       - "docker-compose.deploy.yaml"
+      - "monitoring/prometheus.yml"
       - ".github/workflows/deploy-frontend.yaml"
 
 jobs:
@@ -61,21 +62,28 @@ jobs:
             git checkout dev
             git reset --hard origin/dev
 
-            touch .env.deploy
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
-            if grep -q "^FRONTEND_IMAGE_TAG=" .env.deploy; then
-              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^FRONTEND_IMAGE_TAG=" .env; then
+              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
             else
-              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
             fi
 
             docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull frontend
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d frontend
+            docker compose pull frontend
+            docker compose up -d frontend
 
             docker image prune -f
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps
+            docker compose ps
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -98,18 +106,25 @@ jobs:
             git checkout main
             git reset --hard origin/main
 
-            touch .env.deploy
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
-            if grep -q "^FRONTEND_IMAGE_TAG=" .env.deploy; then
-              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^FRONTEND_IMAGE_TAG=" .env; then
+              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
             else
-              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
             fi
 
             docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull frontend
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d frontend
+            docker compose pull frontend
+            docker compose up -d frontend
 
             docker image prune -f
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps
+            docker compose ps

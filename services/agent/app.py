@@ -66,7 +66,7 @@ SYSTEM_PROMPT = (
     "Use the available tools whenever the user asks to detect objects or modify an image. "
     "Never invent, rewrite, copy, or mention image URLs. "
     "Never copy old assistant messages as the answer. "
-    "If the user asks for a new image edit, call the correct image tool."
+    "If the user asks for a new image edit, call the correct image tool. "
     "When editing a detected object, preserve the user's position words exactly. "
     "If the user says leftmost, call the tool with position='leftmost'. "
     "If the user says rightmost, call the tool with position='rightmost'. "
@@ -75,9 +75,17 @@ SYSTEM_PROMPT = (
     "Do not replace leftmost/rightmost with first. "
     "Detected-object edits are only supported for blur, crop, and add noise. "
     "If the user asks to rotate, resize, or flip only a detected object, explain that this is not supported instead of using the whole-image tool. "
+    "When the user refers to 'this image', 'the image', 'it', 'same image', or asks for another edit without uploading a new image, "
+    "use the latest image stored for the current chat session. Do not ask the user to upload the image again. "
+    "The image tools can access the latest session image automatically. "
+    "Do not output <thinking> tags or hidden reasoning. Give only the final answer to the user. "
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+_current_session_id: ContextVar[Optional[str]] = ContextVar("current_session_id", default=None)
+_current_image_s3_key: ContextVar[Optional[str]] = ContextVar("current_image_s3_key", default=None)
+
+LATEST_IMAGE_BY_SESSION: dict[str, str] = {}
 
 def upload_image_to_s3(image_b64: str) -> str:
     if not AWS_S3_BUCKET:
@@ -97,6 +105,51 @@ def upload_image_to_s3(image_b64: str) -> str:
     )
 
     return image_s3_key
+
+def remember_latest_image(output_s3_key: str) -> None:
+    """
+    Save the latest processed image for the current chat session.
+    """
+    session_id = _current_session_id.get()
+    if session_id:
+        LATEST_IMAGE_BY_SESSION[session_id] = output_s3_key
+        logging.info("SESSION_IMAGE_SAVE session=%s key=%s", session_id, output_s3_key)
+
+    _current_image_s3_key.set(output_s3_key)
+
+
+def get_current_image_s3_key() -> str:
+    """
+    Resolve which image should be used by tools.
+
+    Priority:
+    1. Current request uploaded image, already uploaded to S3
+    2. Latest processed image for this session
+    3. Error if no image exists
+    """
+    image_s3_key = _current_image_s3_key.get()
+
+    if image_s3_key:
+        logging.info("SESSION_IMAGE_USE contextvar key=%s", image_s3_key)
+        return image_s3_key
+
+    session_id = _current_session_id.get()
+    if session_id and session_id in LATEST_IMAGE_BY_SESSION:
+        image_s3_key = LATEST_IMAGE_BY_SESSION[session_id]
+        logging.info("SESSION_IMAGE_USE stored session=%s key=%s", session_id, image_s3_key)
+        _current_image_s3_key.set(image_s3_key)
+        return image_s3_key
+
+    image_b64 = _current_image_b64.get()
+    if image_b64:
+        image_s3_key = upload_image_to_s3(image_b64)
+        logging.info("SESSION_IMAGE_USE uploaded_new_image key=%s", image_s3_key)
+        remember_latest_image(image_s3_key)
+        return image_s3_key
+
+    raise RuntimeError(
+        "No image was provided and there is no previous processed image in this chat."
+    )
 
 def download_image_from_s3(s3_key: str) -> Image.Image:
     if not AWS_S3_BUCKET:
@@ -192,6 +245,21 @@ def select_detection(detection_objects: list[dict], label: str, position: str = 
     )
 
 
+def crop_image_via_mcp(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> tuple[str, Image.Image]:
+    result = call_mcp_tool(
+        "crop",
+        {
+            "input_s3_key": input_s3_key,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+        },
+    )
+    output_s3_key = result["output_s3_key"]
+    return output_s3_key, download_image_from_s3(output_s3_key)
+
+
 def paste_processed_region(
     original_img: Image.Image,
     processed_region: Image.Image,
@@ -225,11 +293,7 @@ def get_selected_object_crop(
     label: str,
     position: str = "first",
 ) -> tuple[str, Image.Image, Image.Image, tuple[int, int, int, int], dict]:
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        raise RuntimeError("No image was provided by the user.")
-
-    original_s3_key = upload_image_to_s3(image_b64)
+    original_s3_key = get_current_image_s3_key()
 
     with httpx.Client(timeout=60.0) as client:
         predict_response = client.post(
@@ -418,30 +482,49 @@ def _unwrap_mcp_tool_result(value) -> dict:
 
 @tool
 def detect_objects() -> str:
-    """Detect and identify objects in the image provided by the user using YOLO object detection."""
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    """
+    Detect and identify objects in the current image.
 
-    image_s3_key = upload_image_to_s3(image_b64)
+    If the user uploaded a new image, detect objects in that image.
+    If not, detect objects in the latest processed image from this chat session.
+    This tool does not modify the current image.
+    """
+    try:
+        image_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
+    with httpx.Client(timeout=60.0) as client:
+        predict_response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
             json={"image_s3_key": image_s3_key},
         )
-        response.raise_for_status()
+        predict_response.raise_for_status()
+        predict_result = predict_response.json()
 
-    return json.dumps(response.json())
+        prediction_uid = predict_result["prediction_uid"]
+
+        details_response = client.get(f"{YOLO_SERVICE_URL}/prediction/{prediction_uid}")
+        details_response.raise_for_status()
+        prediction_details = details_response.json()
+
+    detection_objects = prediction_details.get("detection_objects", [])
+
+    return json.dumps({
+        "message": f"I detected {len(detection_objects)} object(s) in the current image.",
+        "prediction_uid": prediction_uid,
+        "detection_count": len(detection_objects),
+        "labels": [obj.get("label") for obj in detection_objects],
+        "detection_objects": detection_objects,
+    })
 
 @tool
 def blur_image(radius: float = 2.0) -> str:
-    """Blur the image provided by the user. Returns a temporary URL to the processed image."""
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
-
-    input_s3_key = upload_image_to_s3(image_b64)
+    """Blur the current image. If no new image was uploaded, use the latest processed image."""
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     result = call_mcp_tool(
         "blur",
@@ -450,30 +533,28 @@ def blur_image(radius: float = 2.0) -> str:
             "radius": radius,
         },
     )
+
     output_s3_key = result["output_s3_key"]
+    remember_latest_image(output_s3_key)
+
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I blurred the image with radius {radius}.",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def rotate_image(angle: float = 90.0, expand: bool = True) -> str:
     """
-    Rotate the entire image provided by the user.
-
-    Args:
-        angle: Rotation angle in degrees.
-        expand: If True, expand the output image size to fit the rotated image.
-
-    Returns an HTML image tag with the rotated image.
+    Rotate the current image.
+    If no new image was uploaded, use the latest processed image.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
-
-    input_s3_key = upload_image_to_s3(image_b64)
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     result = call_mcp_tool(
         "rotate",
@@ -483,33 +564,39 @@ def rotate_image(angle: float = 90.0, expand: bool = True) -> str:
             "expand": expand,
         },
     )
+
     output_s3_key = result["output_s3_key"]
+    remember_latest_image(output_s3_key)
+
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I rotated the image by {angle} degrees.",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def flip_image(direction: str = "horizontal") -> str:
     """
-    Flip the entire image provided by the user.
+    Flip the current image.
+
+    If the user uploaded a new image, flip that image.
+    If not, flip the latest processed image from this chat session.
 
     Args:
         direction: Flip direction. Use "horizontal" or "vertical".
 
     Returns a temporary URL to the flipped image.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     direction = direction.lower().strip()
     if direction not in ("horizontal", "vertical"):
         return json.dumps({"error": "direction must be 'horizontal' or 'vertical'"})
-
-    input_s3_key = upload_image_to_s3(image_b64)
 
     result = call_mcp_tool(
         "flip",
@@ -518,18 +605,25 @@ def flip_image(direction: str = "horizontal") -> str:
             "direction": direction,
         },
     )
+
     output_s3_key = result["output_s3_key"]
+    remember_latest_image(output_s3_key)
+
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I flipped the image {direction}ly.",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def resize_image(width: int, height: int) -> str:
     """
-    Resize the entire image provided by the user.
+    Resize the current image.
+
+    If the user uploaded a new image, resize that image.
+    If not, resize the latest processed image from this chat session.
 
     Args:
         width: New image width in pixels.
@@ -537,14 +631,13 @@ def resize_image(width: int, height: int) -> str:
 
     Returns a temporary URL to the resized image.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     if width <= 0 or height <= 0:
         return json.dumps({"error": "width and height must be positive integers"})
-
-    input_s3_key = upload_image_to_s3(image_b64)
 
     result = call_mcp_tool(
         "resize",
@@ -554,18 +647,25 @@ def resize_image(width: int, height: int) -> str:
             "height": height,
         },
     )
+
     output_s3_key = result["output_s3_key"]
+    remember_latest_image(output_s3_key)
+
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I resized the image to {width}x{height}.",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def crop_image(left: int, top: int, right: int, bottom: int) -> str:
     """
-    Crop the entire image using pixel coordinates.
+    Crop the current image using pixel coordinates.
+
+    If the user uploaded a new image, crop that image.
+    If not, crop the latest processed image from this chat session.
 
     Args:
         left: Left x-coordinate of the crop box.
@@ -575,53 +675,47 @@ def crop_image(left: int, top: int, right: int, bottom: int) -> str:
 
     Returns a temporary URL to the cropped image.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     if right <= left or bottom <= top:
         return json.dumps({
             "error": "Invalid crop box. right must be greater than left, and bottom must be greater than top."
         })
 
-    input_s3_key = upload_image_to_s3(image_b64)
+    output_s3_key, _ = crop_image_via_mcp(input_s3_key, left, top, right, bottom)
+    remember_latest_image(output_s3_key)
 
-    result = call_mcp_tool(
-        "crop",
-        {
-            "input_s3_key": input_s3_key,
-            "left": left,
-            "top": top,
-            "right": right,
-            "bottom": bottom,
-        },
-    )
-    output_s3_key = result["output_s3_key"]
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I cropped the image using box ({left}, {top}, {right}, {bottom}).",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def add_noise_image(amount: float = 0.05) -> str:
     """
-    Add salt-and-pepper noise to the entire image provided by the user.
+    Add salt-and-pepper noise to the current image.
+
+    If the user uploaded a new image, edit that image.
+    If not, edit the latest processed image from this chat session.
 
     Args:
         amount: Fraction of pixels to modify. Example: 0.05.
 
     Returns a temporary URL to the noisy image.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    try:
+        input_s3_key = get_current_image_s3_key()
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     if amount <= 0 or amount > 1:
         return json.dumps({"error": "amount must be greater than 0 and less than or equal to 1"})
-
-    input_s3_key = upload_image_to_s3(image_b64)
 
     result = call_mcp_tool(
         "add_noise",
@@ -630,18 +724,25 @@ def add_noise_image(amount: float = 0.05) -> str:
             "amount": amount,
         },
     )
+
     output_s3_key = result["output_s3_key"]
+    remember_latest_image(output_s3_key)
+
     image_url = create_presigned_url(output_s3_key)
 
     return json.dumps({
         "message": f"I added salt-and-pepper noise to the image with amount {amount}.",
         "image_url": image_url,
+        "output_s3_key": output_s3_key,
     })
 
 @tool
 def blur_detected_object(label: str, position: str = "first", radius: float = 2.0) -> str:
     """
-    Blur a detected object in the image provided by the user.
+    Blur a detected object in the current image.
+
+    If the user uploaded a new image, use that image.
+    If not, use the latest processed image from this chat session.
 
     Args:
         label: Object label to edit, for example "dog", "car", "person".
@@ -655,11 +756,21 @@ def blur_detected_object(label: str, position: str = "first", radius: float = 2.
 
     Returns an HTML image tag with the final full image, where only the selected object is blurred.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    logging.info(
+        "blur_detected_object called label=%s position=%s radius=%s",
+        label,
+        position,
+        radius,
+    )
 
-    _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(label=label, position=position)
+    try:
+        _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(
+            label=label,
+            position=position,
+        )
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
+
     crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
 
     blur_result = call_mcp_tool(
@@ -683,17 +794,24 @@ def blur_detected_object(label: str, position: str = "first", radius: float = 2.
     )
 
     final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/blur-detected-object")
+    logging.info("blur_detected_object final_s3_key=%s", final_s3_key)
+    remember_latest_image(final_s3_key)
+
     final_image_url = create_presigned_url(final_s3_key)
 
     return json.dumps({
         "message": f"I blurred the {position} {label} in the image.",
         "image_url": final_image_url,
+        "output_s3_key": final_s3_key,
     })
 
 @tool
 def crop_detected_object(label: str, position: str = "first") -> str:
     """
-    Crop a detected object from the image provided by the user.
+    Crop a detected object from the current image.
+
+    If the user uploaded a new image, use that image.
+    If not, use the latest processed image from this chat session.
 
     Args:
         label: Object label to crop, for example "dog", "car", "person".
@@ -706,27 +824,32 @@ def crop_detected_object(label: str, position: str = "first") -> str:
 
     Returns a temporary URL to the cropped detected object.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
-
-    _, _, object_crop, _, _ = get_selected_object_crop(label=label, position=position)
+    try:
+        _, _, object_crop, _, _ = get_selected_object_crop(label=label, position=position)
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
     crop_s3_key = upload_pil_image_to_s3(
         object_crop,
         prefix="agent-results/crop-detected-object",
     )
+    remember_latest_image(crop_s3_key)
+
     crop_image_url = create_presigned_url(crop_s3_key)
 
     return json.dumps({
         "message": f"I cropped the {position} {label} from the image.",
         "image_url": crop_image_url,
+        "output_s3_key": crop_s3_key,
     })
 
 @tool
 def add_noise_to_detected_object(label: str, position: str = "first", amount: float = 0.05) -> str:
     """
-    Add salt-and-pepper noise to a detected object in the image provided by the user.
+    Add salt-and-pepper noise to a detected object in the current image.
+
+    If the user uploaded a new image, use that image.
+    If not, use the latest processed image from this chat session.
 
     Args:
         label: Object label to edit, for example "dog", "car", "person".
@@ -740,11 +863,14 @@ def add_noise_to_detected_object(label: str, position: str = "first", amount: fl
 
     Returns an HTML image tag with the final full image, where only the selected object has noise.
     """
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
-        return json.dumps({"error": "No image was provided by the user."})
+    try:
+        _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(
+            label=label,
+            position=position,
+        )
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)})
 
-    _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(label=label, position=position)
     crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
 
     noise_result = call_mcp_tool(
@@ -768,11 +894,14 @@ def add_noise_to_detected_object(label: str, position: str = "first", amount: fl
     )
 
     final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/noise-detected-object")
+    remember_latest_image(final_s3_key)
+
     final_image_url = create_presigned_url(final_s3_key)
 
     return json.dumps({
         "message": f"I added salt-and-pepper noise to the {position} {label} in the image.",
         "image_url": final_image_url,
+        "output_s3_key": final_s3_key,
     })
 
 
@@ -916,10 +1045,12 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]         # full conversation thread, oldest first
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     response: str
+    session_id: Optional[str] = None
     prediction_id: Optional[str] = None
     annotated_image: Optional[str] = None
     agent_loop_time_s: float
@@ -965,14 +1096,13 @@ def get_unsupported_detected_object_edit_message(user_text: str) -> Optional[str
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     latest_user_msg = None
-    latest_image = None
 
-    # Find the latest user message and latest uploaded image
+    # Find only the latest user message
     for msg in request.messages:
         if msg.role == "user":
             latest_user_msg = msg
-            if msg.image_base64:
-                latest_image = msg.image_base64
+
+    latest_image = latest_user_msg.image_base64 if latest_user_msg else None
 
     if latest_user_msg is None:
         return ChatResponse(
@@ -999,22 +1129,38 @@ def chat(request: ChatRequest):
             context_limit_exceeded=False,
         )
 
+    session_id = request.session_id or str(uuid.uuid4())
+    
+
     if latest_image:
         content += (
             "\n[An image was uploaded with this message. "
             "Use the available tools to analyze or edit this uploaded image according to the user instructions.]"
         )
+   
 
     lc_messages = [HumanMessage(content=content)]
 
-    token = _current_image_b64.set(latest_image)
+
+    uploaded_image_s3_key = None
+    if latest_image:
+        uploaded_image_s3_key = upload_image_to_s3(latest_image)
+        LATEST_IMAGE_BY_SESSION[session_id] = uploaded_image_s3_key
+
+    image_token = _current_image_b64.set(latest_image)
+    session_token = _current_session_id.set(session_id)
+    s3_key_token = _current_image_s3_key.set(uploaded_image_s3_key)
+
     try:
         start_time = time.time()
         result = run_agent(lc_messages)
         result["agent_loop_time_s"] = round(time.time() - start_time, 2)
+        result["session_id"] = session_id
         return ChatResponse(**result)
     finally:
-        _current_image_b64.reset(token)
+        _current_image_b64.reset(image_token)
+        _current_session_id.reset(session_token)
+        _current_image_s3_key.reset(s3_key_token)
 
 
 @app.get("/health")
