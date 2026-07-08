@@ -8,6 +8,7 @@ on:
     paths:
       - "services/agent/**"
       - "docker-compose.deploy.yaml"
+      - "monitoring/prometheus.yml"
       - ".github/workflows/deploy-agent.yaml"
 
 jobs:
@@ -59,21 +60,28 @@ jobs:
             git checkout dev
             git reset --hard origin/dev
 
-            touch .env.deploy
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
-            if grep -q "^AGENT_IMAGE_TAG=" .env.deploy; then
-              sed -i "s|^AGENT_IMAGE_TAG=.*|AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^AGENT_IMAGE_TAG=" .env; then
+              sed -i "s|^AGENT_IMAGE_TAG=.*|AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
             else
-              echo "AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+              echo "AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
             fi
 
             docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull agent
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d agent
+            docker compose pull agent
+            docker compose up -d agent
 
             docker image prune -f
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps
+            docker compose ps
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -96,18 +104,25 @@ jobs:
             git checkout main
             git reset --hard origin/main
 
-            touch .env.deploy
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
-            if grep -q "^AGENT_IMAGE_TAG=" .env.deploy; then
-              sed -i "s|^AGENT_IMAGE_TAG=.*|AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env.deploy
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^AGENT_IMAGE_TAG=" .env; then
+              sed -i "s|^AGENT_IMAGE_TAG=.*|AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
             else
-              echo "AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env.deploy
+              echo "AGENT_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
             fi
 
             docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml pull agent
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml up -d agent
+            docker compose pull agent
+            docker compose up -d agent
 
             docker image prune -f
-            docker compose --env-file .env.deploy -f docker-compose.deploy.yaml ps
+            docker compose ps

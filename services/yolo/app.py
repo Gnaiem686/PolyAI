@@ -157,7 +157,10 @@ def predict(request: S3PredictRequest, db=Depends(get_db)):
     annotated_frame = results[0].plot()  # NumPy image with boxes
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
-    predicted_s3_key = image_s3_key.replace("/original/", "/predicted/")
+    if "/original/" in image_s3_key:
+        predicted_s3_key = image_s3_key.replace("/original/", "/predicted/")
+    else:
+        predicted_s3_key = f"predictions/{uid}/predicted{ext}"
 
     s3_client.upload_file(
         predicted_path,
