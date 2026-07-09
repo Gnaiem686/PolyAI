@@ -9,7 +9,6 @@ from PIL import Image, ImageFilter, ImageOps
 import random
 import numpy as np
 from dotenv import load_dotenv
-
 load_dotenv()
 
 mcp = FastMCP("img-proc", host="0.0.0.0", port=8100)
@@ -54,23 +53,135 @@ def _upload_image_to_s3(img: Image.Image, prefix: str = "processed") -> str:
 
     return output_s3_key
 
+
+def clamp_box_to_image(
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    img: Image.Image,
+) -> tuple[int, int, int, int]:
+    width, height = img.size
+    left = max(0, min(left, width - 1))
+    top = max(0, min(top, height - 1))
+    right = max(left + 1, min(right, width))
+    bottom = max(top + 1, min(bottom, height))
+    return left, top, right, bottom
+
+def resolve_region(
+    img: Image.Image,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> tuple[int, int, int, int]:
+    """
+    Resolve optional coordinates.
+
+    If no coordinates are provided, use the whole image.
+    If coordinates are provided, clamp them to the image bounds.
+    """
+    width, height = img.size
+
+    if left is None:
+        left = 0
+    if top is None:
+        top = 0
+    if right is None:
+        right = width
+    if bottom is None:
+        bottom = height
+
+    return clamp_box_to_image(left, top, right, bottom, img)
+
+def paste_processed_region(
+    original_img: Image.Image,
+    processed_region: Image.Image,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+) -> Image.Image:
+    final_img = original_img.copy()
+    region_width = right - left
+    region_height = bottom - top
+
+    if processed_region.size != (region_width, region_height):
+        processed_region = processed_region.resize((region_width, region_height))
+
+    final_img.paste(processed_region, (left, top))
+    return final_img
+
 ############################################----- blur -----###################################################
-def _blur_image(input_s3_key: str, radius: float = 2.0) -> dict:
+def _blur_image(
+    input_s3_key: str,
+    radius: float = 2.0,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> dict:
     img = _download_image_from_s3(input_s3_key)
-    blurred_img = img.filter(ImageFilter.GaussianBlur(radius))
-    output_s3_key = _upload_image_to_s3(blurred_img, prefix="processed/blur")
+
+    left, top, right, bottom = resolve_region(
+        img=img,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    region = img.crop((left, top, right, bottom))
+    blurred_region = region.filter(ImageFilter.GaussianBlur(radius))
+
+    final_img = paste_processed_region(
+        original_img=img,
+        processed_region=blurred_region,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    output_s3_key = _upload_image_to_s3(final_img, prefix="processed/blur")
 
     return {
         "input_s3_key": input_s3_key,
         "output_s3_key": output_s3_key,
         "operation": "blur",
         "radius": radius,
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
     }
 
+
 @mcp.tool()
-def blur(input_s3_key: str, radius: float = 2.0) -> str:
-    """Apply Gaussian blur to an image stored in S3."""
-    return json.dumps(_blur_image(input_s3_key, radius))
+def blur(
+    input_s3_key: str,
+    radius: float = 2.0,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> str:
+    """
+    Apply Gaussian blur to an image or a rectangular region inside it.
+
+    If left/top/right/bottom are omitted, blur the whole image.
+    If coordinates are provided, blur only that region.
+    """
+    return json.dumps(
+        _blur_image(
+            input_s3_key=input_s3_key,
+            radius=radius,
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+        )
+    )
 
 ############################################----- rotate -----###################################################
 def _rotate_image(input_s3_key: str, angle: float = 90.0, expand: bool = True) -> dict:
@@ -135,24 +246,112 @@ def _resize_image(input_s3_key: str, width: int, height: int) -> dict:
         "height": height,
     }
 
+
 @mcp.tool()
 def resize(input_s3_key: str, width: int, height: int) -> str:
     """Resize an image stored in S3."""
     return json.dumps(_resize_image(input_s3_key, width, height))
 
-############################################----- crop -----###################################################
-def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> dict:
-    if left < 0 or top < 0:
-        raise ValueError("left and top must be non-negative")
-
-    if right <= left or bottom <= top:
-        raise ValueError("right must be greater than left and bottom must be greater than top")
+############################################----- add noise -----###################################################
+def _add_noise_to_image(
+    input_s3_key: str,
+    amount: float = 0.05,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> dict:
+    if amount < 0 or amount > 1:
+        raise ValueError("amount must be between 0 and 1")
 
     img = _download_image_from_s3(input_s3_key)
-    width, height = img.size
 
-    if right > width or bottom > height:
-        raise ValueError("crop box must be inside image bounds")
+    left, top, right, bottom = resolve_region(
+        img=img,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    region = img.crop((left, top, right, bottom))
+    arr = np.array(region).copy()
+
+    height, width = arr.shape[:2]
+    total_pixels = height * width
+    noisy_pixels = int(total_pixels * amount)
+
+    for _ in range(noisy_pixels):
+        x = random.randint(0, width - 1)
+        y = random.randint(0, height - 1)
+
+        if random.random() < 0.5:
+            arr[y, x] = [0, 0, 0]
+        else:
+            arr[y, x] = [255, 255, 255]
+
+    noisy_region = Image.fromarray(arr.astype("uint8"), "RGB")
+
+    final_img = paste_processed_region(
+        original_img=img,
+        processed_region=noisy_region,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
+
+    output_s3_key = _upload_image_to_s3(final_img, prefix="processed/noise")
+
+    return {
+        "input_s3_key": input_s3_key,
+        "output_s3_key": output_s3_key,
+        "operation": "add_noise",
+        "amount": amount,
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+    }
+
+
+@mcp.tool()
+def add_noise(
+    input_s3_key: str,
+    amount: float = 0.05,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> str:
+    """
+    Add salt-and-pepper noise to an image or a rectangular region.
+
+    If left/top/right/bottom are omitted, add noise to the whole image.
+    If coordinates are provided, add noise only to that region.
+    """
+    return json.dumps(
+        _add_noise_to_image(
+            input_s3_key=input_s3_key,
+            amount=amount,
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+        )
+    )
+
+############################################----- crop -----###################################################
+def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> dict:
+    img = _download_image_from_s3(input_s3_key)
+
+    left, top, right, bottom = resolve_region(
+        img=img,
+        left=left,
+        top=top,
+        right=right,
+        bottom=bottom,
+    )
 
     cropped_img = img.crop((left, top, right, bottom))
     output_s3_key = _upload_image_to_s3(cropped_img, prefix="processed/crop")
@@ -169,45 +368,13 @@ def _crop_image(input_s3_key: str, left: int, top: int, right: int, bottom: int)
 
 @mcp.tool()
 def crop(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> str:
-    """Crop a region from an image stored in S3."""
+    """
+    Crop a rectangular region from an image stored in S3.
+
+    Use the full image bounds to crop the whole image.
+    Use detected object coordinates to crop a detected object.
+    """
     return json.dumps(_crop_image(input_s3_key, left, top, right, bottom))
-
-############################################----- add noise -----###################################################
-def _add_noise_to_image(input_s3_key: str, amount: float = 0.05) -> dict:
-    if amount < 0 or amount > 1:
-        raise ValueError("amount must be between 0 and 1")
-
-    img = _download_image_from_s3(input_s3_key)
-    arr = np.array(img).copy()
-
-    height, width = arr.shape[:2]
-    total_pixels = height * width
-    noisy_pixels = int(total_pixels * amount)
-
-    for _ in range(noisy_pixels):
-        x = random.randint(0, width - 1)
-        y = random.randint(0, height - 1)
-
-        if random.random() < 0.5:
-            arr[y, x] = [0, 0, 0]
-        else:
-            arr[y, x] = [255, 255, 255]
-
-    noisy_img = Image.fromarray(arr.astype("uint8"), "RGB")
-    output_s3_key = _upload_image_to_s3(noisy_img, prefix="processed/noise")
-
-    return {
-        "input_s3_key": input_s3_key,
-        "output_s3_key": output_s3_key,
-        "operation": "add_noise",
-        "amount": amount,
-    }
-
-@mcp.tool()
-def add_noise(input_s3_key: str, amount: float = 0.05) -> str:
-    """Add salt-and-pepper noise to an image stored in S3."""
-    return json.dumps(_add_noise_to_image(input_s3_key, amount))
-
 
 if __name__ == "__main__":
     try:

@@ -14,6 +14,9 @@ from PIL import Image
 from prometheus_fastapi_instrumentator import Instrumentator
 from dotenv import load_dotenv
 import time
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+
 load_dotenv()
 
 logging.basicConfig(
@@ -32,12 +35,17 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 IMG_PROC_MCP_URL = os.getenv("IMG_PROC_MCP_URL", "http://localhost:8100/mcp")
+MCP_SERVERS = {
+    "img-proc": {
+        "url": IMG_PROC_MCP_URL,
+        "transport": "streamable_http",
+    }
+}
 MODEL = os.environ.get("MODEL")
 
 # Text-only models
@@ -63,22 +71,52 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand, analyze, and edit images. "
-    "Use the available tools whenever the user asks to detect objects or modify an image. "
-    "Never invent, rewrite, copy, or mention image URLs. "
+
+    "Use only the available MCP tools to modify images. "
+    "The MCP tools include blur, rotate, flip, resize, crop, and add_noise. "
+
+    "When calling an MCP image tool, always use the exact current working image S3 key as input_s3_key. "
+    "Never invent, rewrite, shorten, or modify the input_s3_key. "
+
+    "When the user asks to edit the whole image, use the full-image coordinates provided in the system messages. "
+    "When the user asks to edit a detected object, use the detected-object coordinates provided in the system messages. "
+
+    "For blur requests, always call the MCP tool named blur. "
+    "For add-noise requests, always call the MCP tool named add_noise. "
+    "For crop requests, always call the MCP tool named crop. "
+
+    "When calling blur or add_noise, always include input_s3_key, left, top, right, and bottom. "
+    "When calling crop, always include input_s3_key, left, top, right, and bottom. "
+
+    "For whole-image edit requests, do not call detect_objects. "
+    "Use the full-image coordinates provided in the system message. "
+
+    "For object-specific or region-specific edit requests, first call detect_objects. "
+    "An object-specific request is any request where the user wants to edit only a subject, object, item, thing, person, region, area, or part of the image instead of the whole image. "
+    "Requests with spatial or ordinal descriptions such as leftmost, rightmost, first from left, second from left, nearest, farthest, top, bottom, center, foreground, or background are object-specific or region-specific. "
+
+    "After detect_objects returns objects, choose the detected object whose label and positions best match the user's request. "
+    "Then call the correct MCP image tool using that object's exact left, top, right, and bottom coordinates. "
+
+    "For blur requests, call blur. "
+    "For crop requests, call crop. "
+    "For add-noise requests, call add_noise. "
+
+    "Do not use full-image coordinates for object-specific or region-specific requests. "
+    "Do not ask the user for coordinates if detect_objects can provide object coordinates. "
+
+    "Do not ask the user for coordinates if coordinates are already provided in the system messages. "
+    "Do not ask the user for the label if the object word already appears in the request. "
+
+    "If an MCP tool returns output_s3_key, that output becomes the new current working image. "
+    "Never invent, rewrite, copy, or mention image URLs unless they are returned by the system. "
     "Never copy old assistant messages as the answer. "
-    "If the user asks for a new image edit, call the correct image tool. "
-    "When editing a detected object, preserve the user's position words exactly. "
-    "If the user says leftmost, call the tool with position='leftmost'. "
-    "If the user says rightmost, call the tool with position='rightmost'. "
-    "If the user says second from right, call the tool with position='second from right'. "
-    "If the user says second from left, call the tool with position='second from left'. "
-    "Do not replace leftmost/rightmost with first. "
-    "Detected-object edits are only supported for blur, crop, and add noise. "
-    "If the user asks to rotate, resize, or flip only a detected object, explain that this is not supported instead of using the whole-image tool. "
-    "When the user refers to 'this image', 'the image', 'it', 'same image', or asks for another edit without uploading a new image, "
-    "use the latest image stored for the current chat session. Do not ask the user to upload the image again. "
-    "The image tools can access the latest session image automatically. "
-    "Do not output <thinking> tags or hidden reasoning. Give only the final answer to the user. "
+    "Never output <thinking> tags or hidden reasoning. Give only the final answer to the user."
+
+    "For object-specific edit requests, first call detect_objects. "
+    "After detect_objects returns objects, choose the object whose label and positions match the user request. "
+    "Then call the correct MCP image tool using the object's left, top, right, and bottom coordinates. "
+    "For example, if the user asks to blur the leftmost person, call detect_objects first, then call blur with the leftmost person coordinates. "
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
@@ -163,121 +201,44 @@ def download_image_from_s3(s3_key: str) -> Image.Image:
     image_bytes = response["Body"].read()
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
+def get_full_image_context_for_prompt(input_s3_key: str) -> str:
+    img = download_image_from_s3(input_s3_key)
+    width, height = img.size
 
-def upload_pil_image_to_s3(img: Image.Image, prefix: str = "agent-results") -> str:
-    if not AWS_S3_BUCKET:
-        raise RuntimeError("AWS_S3_BUCKET environment variable is not set")
-
-    output_s3_key = f"{prefix}/{uuid.uuid4()}.png"
-
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-
-    s3_client.put_object(
-        Bucket=AWS_S3_BUCKET,
-        Key=output_s3_key,
-        Body=buffer.getvalue(),
-        ContentType="image/png",
+    return (
+        "Current working image S3 key:\n"
+        f"{input_s3_key}\n\n"
+        "Full image coordinates:\n"
+        f"- left=0; top=0; right={width}; bottom={height}\n\n"
+        "Use these full-image coordinates when the user asks to edit the whole image. "
+        "When calling MCP tools, use the exact input_s3_key shown above."
     )
-
-    return output_s3_key
-
 
 def parse_yolo_box(box_value) -> tuple[int, int, int, int]:
     if isinstance(box_value, str):
-        box = ast.literal_eval(box_value)
+        box_value = box_value.strip()
+
+        try:
+            box = ast.literal_eval(box_value)
+        except (ValueError, SyntaxError):
+            box = [part.strip() for part in box_value.split(",")]
     else:
         box = box_value
 
+    if not isinstance(box, (list, tuple)):
+        raise ValueError(f"YOLO box must be a list or tuple, got: {type(box)}")
+
     if len(box) != 4:
-        raise ValueError("YOLO box must contain four values")
+        raise ValueError(f"YOLO box must contain four values, got: {box}")
 
     left, top, right, bottom = box
 
     return (
-        max(0, int(left)),
-        max(0, int(top)),
-        max(0, int(right)),
-        max(0, int(bottom)),
+        max(0, int(float(left))),
+        max(0, int(float(top))),
+        max(0, int(float(right))),
+        max(0, int(float(bottom))),
     )
-
-
-def select_detection(detection_objects: list[dict], label: str, position: str = "first") -> dict:
-    target_label = label.lower().strip()
-    normalized_position = position.lower().strip()
-
-    matches = [
-        obj for obj in detection_objects
-        if obj.get("label", "").lower().strip() == target_label
-    ]
-
-    if not matches:
-        raise ValueError(f"No detected object with label '{label}' was found")
-
-    def center_x(obj: dict) -> float:
-        left, _, right, _ = parse_yolo_box(obj["box"])
-        return (left + right) / 2
-
-    if normalized_position in ("first", "any"):
-        return matches[0]
-
-    if normalized_position in ("left", "leftmost"):
-        return sorted(matches, key=center_x)[0]
-
-    if normalized_position in ("right", "rightmost"):
-        return sorted(matches, key=center_x, reverse=True)[0]
-
-    if normalized_position in ("second from right", "second right"):
-        sorted_matches = sorted(matches, key=center_x, reverse=True)
-        if len(sorted_matches) < 2:
-            raise ValueError(f"Only found {len(sorted_matches)} object(s) with label '{label}'")
-        return sorted_matches[1]
-
-    if normalized_position in ("second from left", "second left"):
-        sorted_matches = sorted(matches, key=center_x)
-        if len(sorted_matches) < 2:
-            raise ValueError(f"Only found {len(sorted_matches)} object(s) with label '{label}'")
-        return sorted_matches[1]
-
-    raise ValueError(
-        "Unsupported position. Use first, leftmost, rightmost, second from right, or second from left."
-    )
-
-
-def crop_image_via_mcp(input_s3_key: str, left: int, top: int, right: int, bottom: int) -> tuple[str, Image.Image]:
-    result = call_mcp_tool(
-        "crop",
-        {
-            "input_s3_key": input_s3_key,
-            "left": left,
-            "top": top,
-            "right": right,
-            "bottom": bottom,
-        },
-    )
-    output_s3_key = result["output_s3_key"]
-    return output_s3_key, download_image_from_s3(output_s3_key)
-
-
-def paste_processed_region(
-    original_img: Image.Image,
-    processed_region: Image.Image,
-    left: int,
-    top: int,
-    right: int,
-    bottom: int,
-) -> Image.Image:
-    box_width = right - left
-    box_height = bottom - top
-
-    processed_region = processed_region.convert("RGB")
-    processed_region = processed_region.resize((box_width, box_height))
-
-    result_img = original_img.copy()
-    result_img.paste(processed_region, (left, top))
-
-    return result_img
 
 
 def clamp_box_to_image(left: int, top: int, right: int, bottom: int, img: Image.Image) -> tuple[int, int, int, int]:
@@ -287,40 +248,6 @@ def clamp_box_to_image(left: int, top: int, right: int, bottom: int, img: Image.
     top = max(0, min(top, height - 1))
     bottom = max(top + 1, min(bottom, height))
     return left, top, right, bottom
-
-
-def get_selected_object_crop(
-    label: str,
-    position: str = "first",
-) -> tuple[str, Image.Image, Image.Image, tuple[int, int, int, int], dict]:
-    original_s3_key = get_current_image_s3_key()
-
-    with httpx.Client(timeout=60.0) as client:
-        predict_response = client.post(
-            f"{YOLO_SERVICE_URL}/predict",
-            json={"image_s3_key": original_s3_key},
-        )
-        predict_response.raise_for_status()
-        predict_result = predict_response.json()
-
-        prediction_uid = predict_result["prediction_uid"]
-
-        details_response = client.get(f"{YOLO_SERVICE_URL}/prediction/{prediction_uid}")
-        details_response.raise_for_status()
-        prediction_details = details_response.json()
-
-    detection_objects = prediction_details.get("detection_objects", [])
-    selected_detection = select_detection(detection_objects, label=label, position=position)
-
-    left, top, right, bottom = parse_yolo_box(selected_detection["box"])
-
-    original_img = download_image_from_s3(original_s3_key)
-    left, top, right, bottom = clamp_box_to_image(left, top, right, bottom, original_img)
-
-    object_crop = original_img.crop((left, top, right, bottom))
-
-    return original_s3_key, original_img, object_crop, (left, top, right, bottom), selected_detection
-
 
 def create_presigned_url(s3_key: str, expires_in: int = 3600) -> str:
     if not AWS_S3_BUCKET:
@@ -339,155 +266,20 @@ def create_presigned_url(s3_key: str, expires_in: int = 3600) -> str:
 def build_image_response(message: str, image_url: str) -> str:
     return f"{message}\n\n<img src=\"{image_url}\" alt=\"Processed image\">"
 
-def _extract_mcp_json_response(response_text: str) -> dict:
-    """
-    MCP Streamable HTTP may return Server-Sent Events lines like:
-    event: message
-    data: {...}
-
-    This extracts the JSON object from the data line.
-    """
-    for line in response_text.splitlines():
-        if line.startswith("data: "):
-            return json.loads(line[len("data: "):])
-
-    # Fallback if server returns plain JSON
-    return json.loads(response_text)
-
-
-def _mcp_post(payload: dict, session_id: Optional[str] = None) -> tuple[dict, Optional[str]]:
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
-
-    if session_id:
-        headers["mcp-session-id"] = session_id
-
-    with httpx.Client(timeout=60.0) as client:
-        response = client.post(
-            IMG_PROC_MCP_URL,
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-
-    returned_session_id = response.headers.get("mcp-session-id")
-
-    # notifications/initialized usually returns an empty body.
-    if not response.text.strip():
-        return {}, returned_session_id
-
-    parsed = _extract_mcp_json_response(response.text)
-    return parsed, returned_session_id
-
-
-def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
-    """
-    Calls an image-processing MCP tool using the real MCP JSON-RPC protocol:
-    initialize -> notifications/initialized -> tools/call.
-    """
-    initialize_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "polyai-agent",
-                "version": "1.0",
-            },
-        },
-    }
-
-    _, session_id = _mcp_post(initialize_payload)
-
-    if not session_id:
-        raise RuntimeError("MCP server did not return mcp-session-id")
-
-    initialized_payload = {
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized",
-        "params": {},
-    }
-
-    _mcp_post(initialized_payload, session_id=session_id)
-
-    call_payload = {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        },
-    }
-
-    mcp_response, _ = _mcp_post(call_payload, session_id=session_id)
-
-    if "error" in mcp_response:
-        raise RuntimeError(f"MCP tool call failed: {mcp_response['error']}")
-
-    result = mcp_response.get("result", {})
-
-    if result.get("isError"):
-        raise RuntimeError(f"MCP tool returned error: {result}")
-
-    structured = result.get("structuredContent")
-    if structured is not None:
-        return _unwrap_mcp_tool_result(structured)
-
-    content = result.get("content")
-    if content is not None:
-        return _unwrap_mcp_tool_result(content)
-
-    return _unwrap_mcp_tool_result(result)
-
-def _unwrap_mcp_tool_result(value) -> dict:
-    """
-    Convert MCP tool output into the actual dict returned by our image tools.
-
-    Handles shapes like:
-    - {"output_s3_key": "..."}
-    - {"result": "{\"output_s3_key\": \"...\"}"}
-    - {"text": "{\"output_s3_key\": \"...\"}"}
-    - [{"type": "text", "text": "..."}]
-    """
-    if isinstance(value, dict):
-        if "output_s3_key" in value:
-            return value
-
-        if "result" in value:
-            return _unwrap_mcp_tool_result(value["result"])
-
-        if "text" in value:
-            return _unwrap_mcp_tool_result(value["text"])
-
-        return value
-
-    if isinstance(value, list):
-        if not value:
-            return {}
-        return _unwrap_mcp_tool_result(value[0])
-
-    if isinstance(value, str):
-        text = value.strip()
-        try:
-            return _unwrap_mcp_tool_result(json.loads(text))
-        except json.JSONDecodeError:
-            return {"result": text}
-
-    return {}
-
 @tool
 def detect_objects() -> str:
     """
-    Detect and identify objects in the current image.
+    Detect objects in the current image using YOLO.
 
-    If the user uploaded a new image, detect objects in that image.
-    If not, detect objects in the latest processed image from this chat session.
-    This tool does not modify the current image.
+    Use this tool before any object-specific or region-specific edit request.
+    Examples of object-specific requests include editing only:
+    - one subject/object/item/thing in the image
+    - something described by position
+    - something described by ordinal order
+    - something described as foreground/background/center/top/bottom
+
+    This tool does not modify the image.
+    It returns detected objects with labels, positions, and ready-to-use MCP coordinates.
     """
     try:
         image_s3_key = get_current_image_s3_key()
@@ -510,414 +302,89 @@ def detect_objects() -> str:
 
     detection_objects = prediction_details.get("detection_objects", [])
 
-    return json.dumps({
-        "message": f"I detected {len(detection_objects)} object(s) in the current image.",
-        "prediction_uid": prediction_uid,
-        "detection_count": len(detection_objects),
-        "labels": [obj.get("label") for obj in detection_objects],
-        "detection_objects": detection_objects,
-    })
-
-@tool
-def blur_image(radius: float = 2.0) -> str:
-    """Blur the current image. If no new image was uploaded, use the latest processed image."""
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    result = call_mcp_tool(
-        "blur",
-        {
-            "input_s3_key": input_s3_key,
-            "radius": radius,
-        },
-    )
-
-    output_s3_key = result["output_s3_key"]
-    remember_latest_image(output_s3_key)
-
-    image_url = create_presigned_url(output_s3_key)
-
-    return json.dumps({
-        "message": f"I blurred the image with radius {radius}.",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
-
-@tool
-def rotate_image(angle: float = 90.0, expand: bool = True) -> str:
-    """
-    Rotate the current image.
-    If no new image was uploaded, use the latest processed image.
-    """
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    result = call_mcp_tool(
-        "rotate",
-        {
-            "input_s3_key": input_s3_key,
-            "angle": angle,
-            "expand": expand,
-        },
-    )
-
-    output_s3_key = result["output_s3_key"]
-    remember_latest_image(output_s3_key)
-
-    image_url = create_presigned_url(output_s3_key)
-
-    return json.dumps({
-        "message": f"I rotated the image by {angle} degrees.",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
-
-@tool
-def flip_image(direction: str = "horizontal") -> str:
-    """
-    Flip the current image.
-
-    If the user uploaded a new image, flip that image.
-    If not, flip the latest processed image from this chat session.
-
-    Args:
-        direction: Flip direction. Use "horizontal" or "vertical".
-
-    Returns a temporary URL to the flipped image.
-    """
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    direction = direction.lower().strip()
-    if direction not in ("horizontal", "vertical"):
-        return json.dumps({"error": "direction must be 'horizontal' or 'vertical'"})
-
-    result = call_mcp_tool(
-        "flip",
-        {
-            "input_s3_key": input_s3_key,
-            "direction": direction,
-        },
-    )
-
-    output_s3_key = result["output_s3_key"]
-    remember_latest_image(output_s3_key)
-
-    image_url = create_presigned_url(output_s3_key)
-
-    return json.dumps({
-        "message": f"I flipped the image {direction}ly.",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
-
-@tool
-def resize_image(width: int, height: int) -> str:
-    """
-    Resize the current image.
-
-    If the user uploaded a new image, resize that image.
-    If not, resize the latest processed image from this chat session.
-
-    Args:
-        width: New image width in pixels.
-        height: New image height in pixels.
-
-    Returns a temporary URL to the resized image.
-    """
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    if width <= 0 or height <= 0:
-        return json.dumps({"error": "width and height must be positive integers"})
-
-    result = call_mcp_tool(
-        "resize",
-        {
-            "input_s3_key": input_s3_key,
-            "width": width,
-            "height": height,
-        },
-    )
-
-    output_s3_key = result["output_s3_key"]
-    remember_latest_image(output_s3_key)
-
-    image_url = create_presigned_url(output_s3_key)
-
-    return json.dumps({
-        "message": f"I resized the image to {width}x{height}.",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
-
-@tool
-def crop_image(left: int, top: int, right: int, bottom: int) -> str:
-    """
-    Crop the current image using pixel coordinates.
-
-    If the user uploaded a new image, crop that image.
-    If not, crop the latest processed image from this chat session.
-
-    Args:
-        left: Left x-coordinate of the crop box.
-        top: Top y-coordinate of the crop box.
-        right: Right x-coordinate of the crop box.
-        bottom: Bottom y-coordinate of the crop box.
-
-    Returns a temporary URL to the cropped image.
-    """
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    if right <= left or bottom <= top:
+    if not detection_objects:
         return json.dumps({
-            "error": "Invalid crop box. right must be greater than left, and bottom must be greater than top."
+            "message": "No objects were detected in the current image.",
+            "prediction_uid": prediction_uid,
+            "detection_count": 0,
+            "objects": [],
         })
 
-    output_s3_key, _ = crop_image_via_mcp(input_s3_key, left, top, right, bottom)
-    remember_latest_image(output_s3_key)
+    img = download_image_from_s3(image_s3_key)
 
-    image_url = create_presigned_url(output_s3_key)
+    grouped: dict[str, list[dict]] = {}
 
-    return json.dumps({
-        "message": f"I cropped the image using box ({left}, {top}, {right}, {bottom}).",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
+    for obj in detection_objects:
+        label = obj.get("label", "").lower().strip()
+        if not label:
+            continue
 
-@tool
-def add_noise_image(amount: float = 0.05) -> str:
-    """
-    Add salt-and-pepper noise to the current image.
-
-    If the user uploaded a new image, edit that image.
-    If not, edit the latest processed image from this chat session.
-
-    Args:
-        amount: Fraction of pixels to modify. Example: 0.05.
-
-    Returns a temporary URL to the noisy image.
-    """
-    try:
-        input_s3_key = get_current_image_s3_key()
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    if amount <= 0 or amount > 1:
-        return json.dumps({"error": "amount must be greater than 0 and less than or equal to 1"})
-
-    result = call_mcp_tool(
-        "add_noise",
-        {
-            "input_s3_key": input_s3_key,
-            "amount": amount,
-        },
-    )
-
-    output_s3_key = result["output_s3_key"]
-    remember_latest_image(output_s3_key)
-
-    image_url = create_presigned_url(output_s3_key)
-
-    return json.dumps({
-        "message": f"I added salt-and-pepper noise to the image with amount {amount}.",
-        "image_url": image_url,
-        "output_s3_key": output_s3_key,
-    })
-
-@tool
-def blur_detected_object(label: str, position: str = "first", radius: float = 2.0) -> str:
-    """
-    Blur a detected object in the current image.
-
-    If the user uploaded a new image, use that image.
-    If not, use the latest processed image from this chat session.
-
-    Args:
-        label: Object label to edit, for example "dog", "car", "person".
-        position: Which matching object to edit.
-        Use "leftmost" when the user says leftmost, far left, first from left, or on the left.
-        Use "rightmost" when the user says rightmost, far right, first from right, or on the right.
-        Use "second from right" when the user says second from the right.
-        Use "second from left" when the user says second from the left.
-        Use "first" only when the user does not specify a position.
-        radius: Gaussian blur radius.
-
-    Returns an HTML image tag with the final full image, where only the selected object is blurred.
-    """
-    logging.info(
-        "blur_detected_object called label=%s position=%s radius=%s",
-        label,
-        position,
-        radius,
-    )
-
-    try:
-        _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(
-            label=label,
-            position=position,
+        left, top, right, bottom = parse_yolo_box(obj["box"])
+        left, top, right, bottom = clamp_box_to_image(
+            left,
+            top,
+            right,
+            bottom,
+            img,
         )
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
 
-    crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
+        grouped.setdefault(label, []).append({
+            "label": label,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "score": obj.get("score"),
+            "original_detection": obj,
+        })
 
-    blur_result = call_mcp_tool(
-        "blur",
-        {
-            "input_s3_key": crop_s3_key,
-            "radius": radius,
-        },
-    )
+    ready_objects = []
 
-    processed_crop_s3_key = blur_result["output_s3_key"]
-    processed_crop = download_image_from_s3(processed_crop_s3_key)
-
-    final_img = paste_processed_region(
-        original_img=original_img,
-        processed_region=processed_crop,
-        left=left,
-        top=top,
-        right=right,
-        bottom=bottom,
-    )
-
-    final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/blur-detected-object")
-    logging.info("blur_detected_object final_s3_key=%s", final_s3_key)
-    remember_latest_image(final_s3_key)
-
-    final_image_url = create_presigned_url(final_s3_key)
-
-    return json.dumps({
-        "message": f"I blurred the {position} {label} in the image.",
-        "image_url": final_image_url,
-        "output_s3_key": final_s3_key,
-    })
-
-@tool
-def crop_detected_object(label: str, position: str = "first") -> str:
-    """
-    Crop a detected object from the current image.
-
-    If the user uploaded a new image, use that image.
-    If not, use the latest processed image from this chat session.
-
-    Args:
-        label: Object label to crop, for example "dog", "car", "person".
-        position: Which matching object to edit.
-        Use "leftmost" when the user says leftmost, far left, first from left, or on the left.
-        Use "rightmost" when the user says rightmost, far right, first from right, or on the right.
-        Use "second from right" when the user says second from the right.
-        Use "second from left" when the user says second from the left.
-        Use "first" only when the user does not specify a position.
-
-    Returns a temporary URL to the cropped detected object.
-    """
-    try:
-        _, _, object_crop, _, _ = get_selected_object_crop(label=label, position=position)
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
-
-    crop_s3_key = upload_pil_image_to_s3(
-        object_crop,
-        prefix="agent-results/crop-detected-object",
-    )
-    remember_latest_image(crop_s3_key)
-
-    crop_image_url = create_presigned_url(crop_s3_key)
-
-    return json.dumps({
-        "message": f"I cropped the {position} {label} from the image.",
-        "image_url": crop_image_url,
-        "output_s3_key": crop_s3_key,
-    })
-
-@tool
-def add_noise_to_detected_object(label: str, position: str = "first", amount: float = 0.05) -> str:
-    """
-    Add salt-and-pepper noise to a detected object in the current image.
-
-    If the user uploaded a new image, use that image.
-    If not, use the latest processed image from this chat session.
-
-    Args:
-        label: Object label to edit, for example "dog", "car", "person".
-        position: Which matching object to edit.
-        Use "leftmost" when the user says leftmost, far left, first from left, or on the left.
-        Use "rightmost" when the user says rightmost, far right, first from right, or on the right.
-        Use "second from right" when the user says second from the right.
-        Use "second from left" when the user says second from the left.
-        Use "first" only when the user does not specify a position.
-        amount: Fraction of pixels to modify with salt-and-pepper noise. Example: 0.05.
-
-    Returns an HTML image tag with the final full image, where only the selected object has noise.
-    """
-    try:
-        _, original_img, object_crop, (left, top, right, bottom), _ = get_selected_object_crop(
-            label=label,
-            position=position,
+    for label, objects in grouped.items():
+        objects_sorted = sorted(
+            objects,
+            key=lambda o: (o["left"] + o["right"]) / 2,
         )
-    except RuntimeError as exc:
-        return json.dumps({"error": str(exc)})
 
-    crop_s3_key = upload_pil_image_to_s3(object_crop, prefix="agent-crops")
+        n = len(objects_sorted)
 
-    noise_result = call_mcp_tool(
-        "add_noise",
-        {
-            "input_s3_key": crop_s3_key,
-            "amount": amount,
-        },
-    )
+        for index, obj in enumerate(objects_sorted):
+            positions = []
 
-    processed_crop_s3_key = noise_result["output_s3_key"]
-    processed_crop = download_image_from_s3(processed_crop_s3_key)
+            if index == 0:
+                positions.extend(["leftmost", "first from left"])
 
-    final_img = paste_processed_region(
-        original_img=original_img,
-        processed_region=processed_crop,
-        left=left,
-        top=top,
-        right=right,
-        bottom=bottom,
-    )
+            if index == n - 1:
+                positions.extend(["rightmost", "first from right"])
 
-    final_s3_key = upload_pil_image_to_s3(final_img, prefix="agent-results/noise-detected-object")
-    remember_latest_image(final_s3_key)
+            if index == 1:
+                positions.append("second from left")
 
-    final_image_url = create_presigned_url(final_s3_key)
+            if index == n - 2:
+                positions.append("second from right")
+
+            positions.append(f"#{index + 1} from left")
+
+            ready_objects.append({
+                "label": label,
+                "positions": positions,
+                "left": obj["left"],
+                "top": obj["top"],
+                "right": obj["right"],
+                "bottom": obj["bottom"],
+                "score": obj["score"],
+            })
 
     return json.dumps({
-        "message": f"I added salt-and-pepper noise to the {position} {label} in the image.",
-        "image_url": final_image_url,
-        "output_s3_key": final_s3_key,
+        "message": (
+            "Detected objects in the current image. "
+            "Use left/top/right/bottom exactly when calling MCP blur, crop, or add_noise."
+        ),
+        "input_s3_key": image_s3_key,
+        "prediction_uid": prediction_uid,
+        "detection_count": len(ready_objects),
+        "objects": ready_objects,
     })
-
-
-# Registry: map tool name -> tool function
-TOOLS = {
-    detect_objects.name: detect_objects,
-    blur_image.name: blur_image,
-    rotate_image.name: rotate_image,
-    flip_image.name: flip_image,
-    resize_image.name: resize_image,
-    crop_image.name: crop_image,
-    add_noise_image.name: add_noise_image,
-    crop_detected_object.name: crop_detected_object,
-    blur_detected_object.name: blur_detected_object,
-    add_noise_to_detected_object.name: add_noise_to_detected_object,
-}
 
 rate_limiter = InMemoryRateLimiter(
     requests_per_second=0.2,  # 1 request every 5 seconds
@@ -940,15 +407,82 @@ else:
         rate_limiter=rate_limiter,
     )
 
-llm_with_tools = llm.bind_tools(list(TOOLS.values()))
+# In direct MCP mode, tools are discovered inside run_agent()
+# using MultiServerMCPClient. Do not bind local TOOLS globally.
 
-def run_agent(history: list, max_iterations: int = 10) -> str:
+def _tool_result_to_text(result) -> str:
     """
-    Simple ReAct loop:
-      1. Send messages to the LLM.
-      2. If the LLM requests tool calls, execute them and append results.
-      3. Repeat until the LLM returns a plain text response.
-      4. Stop after max_iterations to guard against infinite loops.
+    Convert MCP tool result into text for ToolMessage.
+    """
+    if isinstance(result, str):
+        return result
+
+    if isinstance(result, (dict, list)):
+        return json.dumps(result)
+
+    if hasattr(result, "content"):
+        return _tool_result_to_text(result.content)
+
+    return str(result)
+
+
+def _extract_dict_from_tool_result(result) -> dict:
+    """
+    Try to extract the actual dict returned by an MCP tool.
+
+    Handles shapes like:
+    - {"output_s3_key": "..."}
+    - "{\"output_s3_key\": \"...\"}"
+    - [{"type": "text", "text": "{\"output_s3_key\": \"...\"}"}]
+    - {"content": [...]}
+    - {"structuredContent": {...}}
+    """
+    if hasattr(result, "content"):
+        return _extract_dict_from_tool_result(result.content)
+
+    if isinstance(result, dict):
+        if "output_s3_key" in result:
+            return result
+
+        if "structuredContent" in result:
+            return _extract_dict_from_tool_result(result["structuredContent"])
+
+        if "content" in result:
+            return _extract_dict_from_tool_result(result["content"])
+
+        if "result" in result:
+            return _extract_dict_from_tool_result(result["result"])
+
+        if "text" in result:
+            return _extract_dict_from_tool_result(result["text"])
+
+        return result
+
+    if isinstance(result, list):
+        if not result:
+            return {}
+        for item in result:
+            data = _extract_dict_from_tool_result(item)
+            if data:
+                return data
+
+        return {}
+    if isinstance(result, str):
+        text = result.strip()
+        try:
+            return _extract_dict_from_tool_result(json.loads(text))
+        except json.JSONDecodeError:
+            return {}
+
+    return {}
+    
+async def run_agent(history: list, user_text: str | None = None, max_iterations: int = 10) -> dict:
+    """
+    Direct MCP ReAct loop:
+      1. Discover MCP tools from img-proc-mcp.
+      2. Bind those MCP tools directly to the LLM.
+      3. If the LLM requests an MCP tool call, execute that MCP tool.
+      4. If the MCP tool returns output_s3_key, save it as the latest session image.
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     iterations = 0
@@ -956,55 +490,98 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
     prediction_id = None
     annotated_image = None
     context_limit_exceeded = False
+    client = MultiServerMCPClient(MCP_SERVERS)
+    mcp_tools = await client.get_tools()
+    local_tools = [detect_objects]
+    all_tools = local_tools + mcp_tools
+    tool_map = {tool.name: tool for tool in all_tools}
+    logging.info("TOOLS_BOUND_TO_LLM %s", list(tool_map.keys()))
+    llm_with_tools = llm.bind_tools(all_tools)
 
     while True:
         if iterations >= max_iterations:
-                return {
-                    "response": "I reached the maximum number of reasoning steps. Please try again with a simpler request.",
-                    "prediction_id": prediction_id,
-                    "annotated_image": annotated_image,
-                    "agent_loop_time_s": 0.0,
-                    "iterations": iterations,
-                    "tools_called": tools_called,
-                    "context_limit_exceeded": True,
-                }
-
+            return {
+                "response": "I reached the maximum number of reasoning steps. Please try again with a simpler request.",
+                "prediction_id": prediction_id,
+                "annotated_image": annotated_image,
+                "agent_loop_time_s": 0.0,
+                "iterations": iterations,
+                "tools_called": tools_called,
+                "context_limit_exceeded": True,
+            }
         iterations += 1
-        response: AIMessage = llm_with_tools.invoke(messages)
+        response: AIMessage = await llm_with_tools.ainvoke(messages)
         messages.append(response)
-
         if response.tool_calls:
             for tool_call in response.tool_calls:
-                tools_called.append(tool_call["name"])
-                tool_fn = TOOLS[tool_call["name"]]
-                tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
-                messages.append(tool_result)
-
+                tool_name = tool_call["name"]
+                tool_args = tool_call.get("args", {})
+                tool_call_id = tool_call["id"]
+                tools_called.append(tool_name)
+                if tool_name not in tool_map:
+                    tool_message_content = json.dumps({
+                        "error": f"MCP tool not found: {tool_name}",
+                        "available_tools": list(tool_map.keys()),
+                    })
+                    messages.append(
+                        ToolMessage(
+                            content=tool_message_content,
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                    continue
                 try:
-                    parsed = json.loads(tool_result.content)
-                    if isinstance(parsed, dict):
-                        prediction_id = parsed.get("uid") or parsed.get("prediction_uid") or prediction_id
-                        annotated_image = parsed.get("annotated_image", annotated_image)
+                    logging.info("TOOL_CALL name=%s args=%s", tool_name, tool_args)
 
-                        image_url = parsed.get("image_url")
-                        if isinstance(image_url, str) and image_url:
-                            return {
-                                "response": build_image_response(
-                                    parsed.get("message", ""),
-                                    image_url,
-                                ),
-                                "prediction_id": prediction_id,
-                                "annotated_image": annotated_image,
-                                "agent_loop_time_s": 0.0,
-                                "iterations": iterations,
-                                "tools_called": tools_called,
-                                "context_limit_exceeded": context_limit_exceeded,
-                            }
-                except Exception:
-                    pass
+                    tool_obj = tool_map[tool_name]
+                    raw_tool_result = await tool_obj.ainvoke(tool_args)
+                    parsed = _extract_dict_from_tool_result(raw_tool_result)
+                    output_s3_key = parsed.get("output_s3_key") if isinstance(parsed, dict) else None
+                    if output_s3_key:
+                        remember_latest_image(output_s3_key)
+                        image_url = create_presigned_url(output_s3_key)
+                        parsed["image_url"] = image_url
+                        messages.append(
+                            ToolMessage(
+                                content=json.dumps(parsed),
+                                tool_call_id=tool_call_id,
+                            )
+                        )
+                        operation_messages = {
+                            "blur": "I blurred the image.",
+                            "add_noise": "I added noise to the image.",
+                            "crop": "I cropped the image.",
+                            "rotate": "I rotated the image.",
+                            "flip": "I flipped the image.",
+                            "resize": "I resized the image.",
+                        }
+                        message = operation_messages.get(tool_name, f"I applied {tool_name} to the image.")
+
+                        return {
+                            "response": build_image_response(message, image_url),
+                            "prediction_id": prediction_id,
+                            "annotated_image": annotated_image,
+                            "agent_loop_time_s": 0.0,
+                            "iterations": iterations,
+                            "tools_called": tools_called,
+                            "context_limit_exceeded": context_limit_exceeded,
+                        }
+                    messages.append(
+                        ToolMessage(
+                            content=_tool_result_to_text(raw_tool_result),
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                except Exception as exc:
+                    logging.exception("TOOL_CALL_FAILED name=%s", tool_name)
+                    messages.append(
+                        ToolMessage(
+                            content=json.dumps({"error": str(exc)}),
+                            tool_call_id=tool_call_id,
+                        )
+                    )
 
             continue
-
         if isinstance(response.content, str):
             final_response = response.content
         elif isinstance(response.content, list):
@@ -1014,7 +591,6 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
             )
         else:
             final_response = str(response.content)
-
         return {
             "response": final_response,
             "prediction_id": prediction_id,
@@ -1024,7 +600,6 @@ def run_agent(history: list, max_iterations: int = 10) -> str:
             "tools_called": tools_called,
             "context_limit_exceeded": context_limit_exceeded,
         }
-
 
 app = FastAPI(title="Vision Agent")
 
@@ -1042,11 +617,9 @@ class ChatMessage(BaseModel):
     content: str
     image_base64: Optional[str] = None  # only on user messages that carry an image
 
-
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]         # full conversation thread, oldest first
     session_id: Optional[str] = None
-
 
 class ChatResponse(BaseModel):
     response: str
@@ -1068,17 +641,14 @@ def get_unsupported_detected_object_edit_message(user_text: str) -> Optional[str
     These are object-specific edits we do not currently support.
     """
     text = user_text.lower()
-
     detected_object_words = [
         "detected", "object", "person", "people", "dog", "cat", "car", "laptop", "chair", "bottle", "bus", "truck", "bike","bicycle",
     ]
-
     unsupported_operations = {
         "rotate": ["rotate", "turn"],
         "resize": ["resize", "make bigger", "make smaller", "scale"],
         "flip": ["flip", "mirror"],
     }
-
     mentions_object = any(word in text for word in detected_object_words)
 
     if not mentions_object:
@@ -1094,19 +664,17 @@ def get_unsupported_detected_object_edit_message(user_text: str) -> Optional[str
     return None
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
+async def chat(request: ChatRequest):
     latest_user_msg = None
 
     # Find only the latest user message
     for msg in request.messages:
         if msg.role == "user":
             latest_user_msg = msg
-
-    latest_image = latest_user_msg.image_base64 if latest_user_msg else None
-
     if latest_user_msg is None:
         return ChatResponse(
             response="No user message was provided.",
+            session_id=request.session_id,
             prediction_id=None,
             annotated_image=None,
             agent_loop_time_s=0.0,
@@ -1114,13 +682,15 @@ def chat(request: ChatRequest):
             tools_called=[],
             context_limit_exceeded=False,
         )
-
+    session_id = request.session_id or str(uuid.uuid4())
+    latest_image = latest_user_msg.image_base64
     content = latest_user_msg.content
-
+    original_user_text = latest_user_msg.content
     unsupported_message = get_unsupported_detected_object_edit_message(content)
     if unsupported_message:
         return ChatResponse(
             response=unsupported_message,
+            session_id=session_id,
             prediction_id=None,
             annotated_image=None,
             agent_loop_time_s=0.0,
@@ -1128,35 +698,53 @@ def chat(request: ChatRequest):
             tools_called=[],
             context_limit_exceeded=False,
         )
-
-    session_id = request.session_id or str(uuid.uuid4())
-    
-
-    if latest_image:
-        content += (
-            "\n[An image was uploaded with this message. "
-            "Use the available tools to analyze or edit this uploaded image according to the user instructions.]"
-        )
-   
-
-    lc_messages = [HumanMessage(content=content)]
-
-
     uploaded_image_s3_key = None
     if latest_image:
         uploaded_image_s3_key = upload_image_to_s3(latest_image)
         LATEST_IMAGE_BY_SESSION[session_id] = uploaded_image_s3_key
 
+        content += (
+            "\n[An image was uploaded with this message. "
+            "Use the available MCP image tools to edit this uploaded image according to the user instructions.]"
+        )
+    active_image_s3_key = None
+    if uploaded_image_s3_key:
+        active_image_s3_key = uploaded_image_s3_key
+    elif session_id in LATEST_IMAGE_BY_SESSION:
+        active_image_s3_key = LATEST_IMAGE_BY_SESSION[session_id]
+
+    lc_messages = []
+
+    if active_image_s3_key:
+        full_image_context = get_full_image_context_for_prompt(active_image_s3_key)
+        logging.info("FULL_IMAGE_CONTEXT_FOR_PROMPT:\n%s", full_image_context)
+
+        lc_messages.append(SystemMessage(content=full_image_context))
+    else:
+        lc_messages.append(
+            SystemMessage(
+                content=(
+                    "No current working image S3 key is available. "
+                    "If the user asks for image editing, ask them to upload an image."
+                )
+            )
+        )
+
+    lc_messages.append(HumanMessage(content=content))
     image_token = _current_image_b64.set(latest_image)
     session_token = _current_session_id.set(session_id)
-    s3_key_token = _current_image_s3_key.set(uploaded_image_s3_key)
+    s3_key_token = _current_image_s3_key.set(active_image_s3_key)
 
     try:
         start_time = time.time()
-        result = run_agent(lc_messages)
+
+        result = await run_agent(lc_messages, user_text=original_user_text)
+
         result["agent_loop_time_s"] = round(time.time() - start_time, 2)
         result["session_id"] = session_id
+
         return ChatResponse(**result)
+
     finally:
         _current_image_b64.reset(image_token)
         _current_session_id.reset(session_token)
