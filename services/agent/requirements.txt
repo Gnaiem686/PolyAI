@@ -15,4 +15,5 @@ boto3
 pillow
 prometheus-fastapi-instrumentator
 mcp[cli]
-
+langchain-mcp-adapters
+langgraph
