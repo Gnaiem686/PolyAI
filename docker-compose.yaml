@@ -96,6 +96,19 @@ services:
     networks:
       - monitoring-net
 
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    container_name: polyai-fluent-bit
+    restart: unless-stopped
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - S3_LOGS_BUCKET=${S3_LOGS_BUCKET}
+
 volumes:
   grafana-data:
   prometheus-data:
