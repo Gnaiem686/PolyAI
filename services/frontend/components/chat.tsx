@@ -13,6 +13,7 @@ export default function Chat() {
   const [imageB64, setImageB64] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -21,6 +22,22 @@ export default function Chat() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const storedSessionId = window.sessionStorage.getItem("vision-agent-session-id");
+    if (storedSessionId) {
+      setSessionId(storedSessionId);
+      return;
+    }
+
+    const newSessionId =
+      window.crypto?.randomUUID?.() ?? `session-${Date.now()}`;
+
+    window.sessionStorage.setItem("vision-agent-session-id", newSessionId);
+    setSessionId(newSessionId);
+  }, []);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -60,8 +77,14 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      const reply = await sendMessage(next);
-      setMessages([...next, { role: "assistant", content: reply }]);
+      const result = await sendMessage(next, sessionId);
+
+      if (result.session_id) {
+        setSessionId(result.session_id);
+        window.sessionStorage.setItem("vision-agent-session-id", result.session_id);
+      }
+
+      setMessages([...next, { role: "assistant", content: result.response }]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Something went wrong");
     } finally {

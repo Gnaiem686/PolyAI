@@ -1,0 +1,130 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "services/frontend/**"
+      - "docker-compose.deploy.yaml"
+      - "monitoring/prometheus.yml"
+      - ".github/workflows/deploy-frontend.yaml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: gnaiem686
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/frontend
+          push: true
+          tags: gnaiem686/polyai-frontend:${{ steps.vars.outputs.image_tag }}
+          build-args: |
+            NEXT_PUBLIC_AGENT_URL=${{ github.ref == 'refs/heads/main' && format('http://{0}:8000', secrets.PROD_INSTANCE_IP) || format('http://{0}:8000', secrets.DEV_INSTANCE_IP) }}
+
+  deploy-dev:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy Frontend to Dev instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/PolyAI
+
+            git fetch origin
+            git checkout dev
+            git reset --hard origin/dev
+
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
+
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^FRONTEND_IMAGE_TAG=" .env; then
+              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
+            else
+              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
+            fi
+
+            docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+            docker compose pull frontend
+            docker compose up -d frontend
+
+            docker image prune -f
+            docker compose ps
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy Frontend to Prod instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/PolyAI
+
+            git fetch origin
+            git checkout main
+            git reset --hard origin/main
+
+            mkdir -p /home/ubuntu/polyai-deploy/monitoring
+
+            cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
+
+            cd /home/ubuntu/polyai-deploy
+
+            touch .env
+
+            if grep -q "^FRONTEND_IMAGE_TAG=" .env; then
+              sed -i "s|^FRONTEND_IMAGE_TAG=.*|FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}|" .env
+            else
+              echo "FRONTEND_IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> .env
+            fi
+
+            docker login -u gnaiem686 -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+            docker compose pull frontend
+            docker compose up -d frontend
+
+            docker image prune -f
+            docker compose ps

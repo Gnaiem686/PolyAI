@@ -12,3 +12,8 @@ langchain[google-genai]
 httpx
 pydantic
 boto3
+pillow
+prometheus-fastapi-instrumentator
+mcp[cli]
+langchain-mcp-adapters
+langgraph

@@ -1,0 +1,7 @@
+mcp[cli]
+pillow
+boto3
+pytest
+moto
+numpy
+python-dotenv
