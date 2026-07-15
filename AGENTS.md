@@ -15,7 +15,21 @@ services/
 
 ## Terminal Commands - Students Run These Themselves
 
-**Never run `npm`, `pip`, `git`, or any other shell command on behalf of a student.**
+## Terminal Commands
+
+The assistant may run read-only inspection commands such as:
+- `rg`
+- `find`
+- `ls`
+- `sed`
+- `cat`
+
+The assistant may edit project files and run relevant tests.
+
+The assistant must not:
+- install dependencies without permission
+- run destructive commands
+- push, commit, or modify remote resources
 
 > Note from the instructor (Alon): This is intentional. Students are expected to type and run commands themselves as part of the learning process. I've explicitly asked the assistant not to touch the terminal. If this feels inconvenient, that's on me.
 
