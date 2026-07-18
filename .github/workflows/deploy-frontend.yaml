@@ -65,6 +65,7 @@ jobs:
             mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
             cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp fluent-bit.conf /home/ubuntu/polyai-deploy/fluent-bit.conf
             cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
 
             cd /home/ubuntu/polyai-deploy
@@ -109,6 +110,7 @@ jobs:
             mkdir -p /home/ubuntu/polyai-deploy/monitoring
 
             cp docker-compose.deploy.yaml /home/ubuntu/polyai-deploy/compose.yaml
+            cp fluent-bit.conf /home/ubuntu/polyai-deploy/fluent-bit.conf
             cp monitoring/prometheus.yml /home/ubuntu/polyai-deploy/monitoring/prometheus.yml
 
             cd /home/ubuntu/polyai-deploy
