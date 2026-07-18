@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: agent
-          image: gnaiem686/polyai-agent:k8s-cors
+          image: gnaiem686/polyai-agent:ca1dd05312842e3523f936104fff41bb9cf62a57
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

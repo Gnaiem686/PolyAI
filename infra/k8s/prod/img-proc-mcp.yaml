@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: img-proc-mcp
-          image: gnaiem686/polyai-img-proc-mcp:c83af6f6a0ef6221b414a4f713127dfc9f9dcafa
+          image: gnaiem686/polyai-img-proc-mcp:ca1dd05312842e3523f936104fff41bb9cf62a57
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8100

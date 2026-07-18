@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: yolo
-          image: gnaiem686/polyai-yolo:f8a61d10a533977db5961482a952c8a0f419eed9
+          image: gnaiem686/polyai-yolo:ca1dd05312842e3523f936104fff41bb9cf62a57
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
