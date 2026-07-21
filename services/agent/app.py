@@ -12,6 +12,7 @@ import ast
 # Redeploy check: harmless comment for CI/CD verification
 from PIL import Image
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram
 from dotenv import load_dotenv
 import time
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -25,6 +26,24 @@ logging.basicConfig(
 )
 logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
+
+AGENT_CHAT_REQUESTS = Counter(
+    "agent_chat_requests_total",
+    "Total POST /chat requests completed by status.",
+    ["status"],
+)
+AGENT_CHAT_REQUEST_DURATION = Histogram(
+    "agent_chat_request_duration_seconds",
+    "POST /chat request duration in seconds.",
+)
+AGENT_INPUT_TOKENS = Counter(
+    "agent_input_tokens_total",
+    "Total input tokens reported by LLM responses.",
+)
+AGENT_OUTPUT_TOKENS = Counter(
+    "agent_output_tokens_total",
+    "Total output tokens reported by LLM responses.",
+)
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
@@ -475,7 +494,28 @@ def _extract_dict_from_tool_result(result) -> dict:
             return {}
 
     return {}
-    
+
+
+def _record_llm_token_usage(response: AIMessage) -> None:
+    """Record token usage once for one LLM response, when metadata is available."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+
+    if input_tokens is None or output_tokens is None:
+        response_metadata = getattr(response, "response_metadata", None) or {}
+        bedrock_usage = response_metadata.get("usage", {})
+        if input_tokens is None:
+            input_tokens = bedrock_usage.get("inputTokens")
+        if output_tokens is None:
+            output_tokens = bedrock_usage.get("outputTokens")
+
+    if input_tokens is not None:
+        AGENT_INPUT_TOKENS.inc(input_tokens)
+    if output_tokens is not None:
+        AGENT_OUTPUT_TOKENS.inc(output_tokens)
+
+
 async def run_agent(history: list, user_text: str | None = None, max_iterations: int = 10) -> dict:
     """
     Direct MCP ReAct loop:
@@ -511,6 +551,7 @@ async def run_agent(history: list, user_text: str | None = None, max_iterations:
             }
         iterations += 1
         response: AIMessage = await llm_with_tools.ainvoke(messages)
+        _record_llm_token_usage(response)
         messages.append(response)
         if response.tool_calls:
             for tool_call in response.tool_calls:
@@ -663,8 +704,7 @@ def get_unsupported_detected_object_edit_message(user_text: str) -> Optional[str
 
     return None
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def _chat_impl(request: ChatRequest) -> ChatResponse:
     latest_user_msg = None
 
     # Find only the latest user message
@@ -751,9 +791,28 @@ async def chat(request: ChatRequest):
         _current_image_s3_key.reset(s3_key_token)
 
 
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    start_time = time.perf_counter()
+    try:
+        response = await _chat_impl(request)
+        AGENT_CHAT_REQUESTS.labels(status="success").inc()
+        return response
+    except Exception:
+        AGENT_CHAT_REQUESTS.labels(status="error").inc()
+        raise
+    finally:
+        AGENT_CHAT_REQUEST_DURATION.observe(time.perf_counter() - start_time)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready():
+    return {"status": "ready"}
 
 
 if __name__ == "__main__":

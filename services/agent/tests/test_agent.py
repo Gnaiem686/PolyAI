@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from prometheus_client import REGISTRY
 
 os.environ.setdefault("MODEL", "google_genai:gemini-2.5-flash")
 os.environ.setdefault("GOOGLE_API_KEY", "fake-test-key")
@@ -225,6 +226,42 @@ def test_run_agent_returns_plain_response_without_tools_new_flow():
     assert result["iterations"] == 1
     assert result["tools_called"] == []
     assert result["context_limit_exceeded"] is False
+
+
+def test_run_agent_records_bedrock_usage_for_every_llm_call():
+    input_before = REGISTRY.get_sample_value("agent_input_tokens_total") or 0
+    output_before = REGISTRY.get_sample_value("agent_output_tokens_total") or 0
+    passthrough_tool = FakeMCPTool(name="passthrough", result="done")
+    fake_bound_llm = FakeBoundLLM([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "passthrough",
+                "args": {},
+                "id": "tool-call-usage",
+            }],
+            response_metadata={
+                "usage": {"inputTokens": 10, "outputTokens": 4}
+            },
+        ),
+        AIMessage(
+            content="Finished",
+            usage_metadata={"input_tokens": 12, "output_tokens": 5, "total_tokens": 17},
+        ),
+    ])
+    fake_llm = FakeLLM(fake_bound_llm)
+
+    with patch("app.llm", fake_llm), \
+         patch(
+             "app.MultiServerMCPClient",
+             return_value=FakeMCPClient([passthrough_tool]),
+         ):
+        result = asyncio.run(agent_app.run_agent([]))
+
+    assert result["response"] == "Finished"
+    assert fake_bound_llm.call_count == 2
+    assert REGISTRY.get_sample_value("agent_input_tokens_total") == input_before + 22
+    assert REGISTRY.get_sample_value("agent_output_tokens_total") == output_before + 9
 
 def test_run_agent_executes_mcp_blur_and_returns_image():
     blur_tool = FakeMCPTool(

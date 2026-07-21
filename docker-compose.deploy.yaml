@@ -2,6 +2,12 @@ services:
   yolo:
     image: gnaiem686/polyai-yolo:${YOLO_IMAGE_TAG}
     container_name: polyai-yolo
+    labels:
+      container_name: yolo
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "8080:8080"
     environment:
@@ -15,6 +21,12 @@ services:
   agent:
     image: gnaiem686/polyai-agent:${AGENT_IMAGE_TAG}
     container_name: polyai-agent
+    labels:
+      container_name: agent
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "8000:8000"
     environment:
@@ -33,6 +45,12 @@ services:
   frontend:
     image: gnaiem686/polyai-frontend:${FRONTEND_IMAGE_TAG}
     container_name: polyai-frontend
+    labels:
+      container_name: frontend
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "3000:3000"
     depends_on:
@@ -43,6 +61,12 @@ services:
   img-proc-mcp:
     image: gnaiem686/polyai-img-proc-mcp:${IMG_PROC_MCP_IMAGE_TAG}
     container_name: polyai-img-proc-mcp
+    labels:
+      container_name: img-proc-mcp
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "8100:8100"
     environment:
@@ -55,6 +79,12 @@ services:
   prometheus:
     image: prom/prometheus
     container_name: polyai-prometheus
+    labels:
+      container_name: prometheus
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "9090:9090"
     volumes:
@@ -70,10 +100,18 @@ services:
   grafana:
     image: grafana/grafana
     container_name: polyai-grafana
+    labels:
+      container_name: grafana
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "3001:3000"
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     networks:
@@ -82,10 +120,35 @@ services:
   node-exporter:
     image: prom/node-exporter
     container_name: polyai-node-exporter
+    labels:
+      container_name: node-exporter
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     ports:
       - "9100:9100"
     networks:
       - monitoring-net
+
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    container_name: polyai-fluent-bit
+    labels:
+      container_name: fluent-bit
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
+    restart: unless-stopped
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - S3_LOGS_BUCKET=${S3_LOGS_BUCKET}
 
 volumes:
   grafana-data:
