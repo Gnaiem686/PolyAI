@@ -1,0 +1,139 @@
+name: Build Images and Update Kubernetes Manifests
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - "services/agent/**"
+      - "services/frontend/**"
+      - "services/img-proc-mcp/**"
+      - "services/yolo/**"
+      - ".github/workflows/cd.yaml"
+
+permissions:
+  contents: write
+
+jobs:
+  update-images:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: gnaiem686
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build changed images and update manifests
+        id: update
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$CURRENT_SHA")"
+          else
+            CHANGED_FILES="$(git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA")"
+          fi
+
+          if [ "$BRANCH_NAME" = "dev" ]; then
+            ENVIRONMENT="dev"
+          else
+            ENVIRONMENT="prod"
+          fi
+
+          : > /tmp/changed-services
+
+          if grep -q '^services/agent/' <<< "$CHANGED_FILES"; then
+            echo "agent" >> /tmp/changed-services
+          fi
+
+          if grep -q '^services/frontend/' <<< "$CHANGED_FILES"; then
+            echo "frontend" >> /tmp/changed-services
+          fi
+
+          if grep -q '^services/img-proc-mcp/' <<< "$CHANGED_FILES"; then
+            echo "img-proc-mcp" >> /tmp/changed-services
+          fi
+
+          if grep -q '^services/yolo/' <<< "$CHANGED_FILES"; then
+            echo "yolo" >> /tmp/changed-services
+          fi
+
+          if [ ! -s /tmp/changed-services ]; then
+            echo "No microservice source directories changed."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          while read -r SERVICE; do
+            case "$SERVICE" in
+              agent)
+                CONTEXT="services/agent"
+                IMAGE="gnaiem686/polyai-agent"
+                MANIFEST="infra/k8s/${ENVIRONMENT}/agent.yaml"
+                ;;
+              frontend)
+                CONTEXT="services/frontend"
+                IMAGE="gnaiem686/polyai-frontend"
+                MANIFEST="infra/k8s/${ENVIRONMENT}/frontend.yaml"
+                ;;
+              img-proc-mcp)
+                CONTEXT="services/img-proc-mcp"
+                IMAGE="gnaiem686/polyai-img-proc-mcp"
+                MANIFEST="infra/k8s/${ENVIRONMENT}/img-proc-mcp.yaml"
+                ;;
+              yolo)
+                CONTEXT="services/yolo"
+                IMAGE="gnaiem686/polyai-yolo"
+                MANIFEST="infra/k8s/${ENVIRONMENT}/yolo.yaml"
+                ;;
+              *)
+                echo "Unknown service: $SERVICE"
+                exit 1
+                ;;
+            esac
+
+            docker build \
+              --tag "${IMAGE}:${CURRENT_SHA}" \
+              "$CONTEXT"
+
+            docker push "${IMAGE}:${CURRENT_SHA}"
+
+            sed -i -E \
+              "s|(image: ${IMAGE}:).*|\1${CURRENT_SHA}|" \
+              "$MANIFEST"
+          done < /tmp/changed-services
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated image tags
+        if: steps.update.outputs.changed == 'true'
+        env:
+          MANIFEST_ENVIRONMENT: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "infra/k8s/${MANIFEST_ENVIRONMENT}"
+
+          if git diff --cached --quiet; then
+            echo "Image tags already match this commit."
+            exit 0
+          fi
+
+          git commit -m "chore(cd): update ${{ github.ref_name }} image tags [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
