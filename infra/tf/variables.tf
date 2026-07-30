@@ -74,6 +74,21 @@ variable "ssh_key_name" {
   type        = string
 }
 
+variable "ssh_allowed_cidr" {
+  description = "Administrator public IPv4 /32 CIDR allowed to SSH to the cluster nodes; defaults to the Terraform runner IP for local use"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.ssh_allowed_cidr == null ? true : (
+      can(cidrnetmask(var.ssh_allowed_cidr))
+      && can(regex("/32$", var.ssh_allowed_cidr))
+    )
+    error_message = "ssh_allowed_cidr must be a valid IPv4 /32 CIDR, for example 203.0.113.10/32."
+  }
+}
+
 variable "name_prefix" {
   description = "Prefix used for AWS resource names"
   type        = string
