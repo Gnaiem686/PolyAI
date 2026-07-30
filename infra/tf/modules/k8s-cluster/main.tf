@@ -291,6 +291,17 @@ resource "aws_launch_template" "worker" {
   instance_type = var.worker_instance_type
   key_name      = var.ssh_key_name
 
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_size           = 20
+      volume_type           = "gp3"
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
   iam_instance_profile {
     name = aws_iam_instance_profile.worker.name
   }
