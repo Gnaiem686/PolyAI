@@ -68,6 +68,36 @@ curl -fsSL \
 unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 
+# Calico routes pod traffic through this EC2 instance. AWS source/destination
+# checks reject packets whose source or destination is a pod IP, so every
+# autoscaled worker disables the check on itself before joining the cluster.
+IMDS_TOKEN=$(curl --fail --silent --show-error \
+  --request PUT \
+  --header "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
+  "http://169.254.169.254/latest/api/token")
+
+INSTANCE_ID=$(curl --fail --silent --show-error \
+  --header "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  "http://169.254.169.254/latest/meta-data/instance-id")
+
+for attempt in $(seq 1 60); do
+  if aws ec2 modify-instance-attribute \
+    --region "${region}" \
+    --instance-id "$INSTANCE_ID" \
+    --no-source-dest-check; then
+    echo "Disabled EC2 source/destination checks."
+    break
+  fi
+
+  if [ "$attempt" -eq 60 ]; then
+    echo "Failed to disable EC2 source/destination checks."
+    exit 1
+  fi
+
+  echo "Waiting for permission to disable EC2 source/destination checks..."
+  sleep 5
+done
+
 # Keep reading the command from SSM until this worker joins successfully.
 # During control-plane replacement, Parameter Store can briefly contain the
 # previous control-plane address. Re-reading avoids permanently failing on it.
