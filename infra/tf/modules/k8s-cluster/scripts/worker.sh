@@ -5,6 +5,7 @@ set -e
 # A new control-plane instance ID changes this rendered user data, which creates
 # a new Launch Template version and makes the ASG replace existing workers.
 # Control-plane generation: ${control_plane_instance_id}
+# Source/destination-check policy generation: ${source_dest_check_policy_hash}
 
 hostnamectl set-hostname "worker-$(hostname)"
 
@@ -71,14 +72,33 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 # Calico routes pod traffic through this EC2 instance. AWS source/destination
 # checks reject packets whose source or destination is a pod IP, so every
 # autoscaled worker disables the check on itself before joining the cluster.
-IMDS_TOKEN=$(curl --fail --silent --show-error \
-  --request PUT \
-  --header "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
-  "http://169.254.169.254/latest/api/token")
+IMDS_TOKEN=""
+INSTANCE_ID=""
 
-INSTANCE_ID=$(curl --fail --silent --show-error \
-  --header "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-  "http://169.254.169.254/latest/meta-data/instance-id")
+for metadata_attempt in $(seq 1 30); do
+  if IMDS_TOKEN=$(curl --fail --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 5 \
+    --request PUT \
+    --header "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
+    "http://169.254.169.254/latest/api/token"); then
+    if INSTANCE_ID=$(curl --fail --silent --show-error \
+      --connect-timeout 2 \
+      --max-time 5 \
+      --header "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+      "http://169.254.169.254/latest/meta-data/instance-id"); then
+      break
+    fi
+  fi
+
+  if [ "$metadata_attempt" -eq 30 ]; then
+    echo "Failed to read the EC2 instance ID from IMDS."
+    exit 1
+  fi
+
+  echo "Waiting for EC2 metadata..."
+  sleep 2
+done
 
 for attempt in $(seq 1 60); do
   if aws ec2 modify-instance-attribute \
