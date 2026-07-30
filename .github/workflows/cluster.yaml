@@ -233,7 +233,9 @@ jobs:
             if ssh \
               -i "$KEY_FILE" \
               -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=5 \
+              -o ConnectTimeout=10 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
               "ubuntu@${CONTROL_PLANE_IP}" \
               "sudo cloud-init status --wait >/dev/null"; then
               break
@@ -250,23 +252,35 @@ jobs:
           ssh \
             -i "$KEY_FILE" \
             -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
             "ubuntu@${CONTROL_PLANE_IP}" \
             "mkdir -p /tmp/polyai-bootstrap"
 
           scp \
             -i "$KEY_FILE" \
             -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
             infra/scripts/bootstrap-cluster.sh \
             "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/bootstrap-cluster.sh"
 
           scp \
             -i "$KEY_FILE" \
             -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
             -r infra/argocd \
             "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/argocd"
 
           ssh \
             -i "$KEY_FILE" \
             -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
             "ubuntu@${CONTROL_PLANE_IP}" \
             "sudo bash /tmp/polyai-bootstrap/bootstrap-cluster.sh /tmp/polyai-bootstrap/argocd"
