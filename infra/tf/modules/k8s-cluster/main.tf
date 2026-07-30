@@ -117,6 +117,7 @@ resource "aws_instance" "control_plane" {
   iam_instance_profile = aws_iam_instance_profile.control_plane.name
 
   associate_public_ip_address = true
+  source_dest_check           = false
 
   root_block_device {
     volume_size = 20
@@ -220,6 +221,34 @@ resource "aws_iam_role_policy" "worker_join_command" {
         ]
 
         Resource = "arn:aws:ssm:${var.region}:*:parameter/${var.name_prefix}/${var.environment}/kubeadm-join-command"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "worker_source_dest_check" {
+  name = "${var.name_prefix}-${var.environment}-worker-source-dest-check"
+  role = aws_iam_role.worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Action = [
+          "ec2:ModifyInstanceAttribute"
+        ]
+
+        Resource = "arn:aws:ec2:${var.region}:*:instance/*"
+
+        Condition = {
+          StringEquals = {
+            "ec2:Attribute"        = "sourceDestCheck"
+            "ec2:ResourceTag/Name" = "${var.name_prefix}-${var.environment}-worker"
+          }
+        }
       }
     ]
   })
@@ -401,6 +430,7 @@ resource "aws_autoscaling_group" "worker" {
 
   depends_on = [
     aws_iam_role_policy.worker_join_command,
+    aws_iam_role_policy.worker_source_dest_check,
     aws_iam_role_policy_attachment.worker_ecr_read_only
   ]
 }

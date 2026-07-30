@@ -35,9 +35,34 @@ curl --fail --silent --show-error --location \
 
 kubectl wait \
   --for=condition=Ready \
-  nodes \
-  --all \
+  node/control-plane \
   --timeout=15m
+
+# ASG replacements terminate EC2 instances without deleting their Kubernetes
+# Node objects. Ignore stale NotReady objects and require at least one current
+# worker to become Ready.
+READY_WORKER=""
+
+for attempt in $(seq 1 90); do
+  READY_WORKER=$(
+    kubectl get nodes \
+      --selector='!node-role.kubernetes.io/control-plane' \
+      --output=jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+      | awk '$2 == "True" { print $1; exit }'
+  )
+
+  if [ -n "$READY_WORKER" ]; then
+    echo "Worker $READY_WORKER is Ready."
+    break
+  fi
+
+  if [ "$attempt" -eq 90 ]; then
+    echo "Timed out waiting for a Ready worker."
+    exit 1
+  fi
+
+  sleep 10
+done
 
 echo "Installing ArgoCD..."
 
