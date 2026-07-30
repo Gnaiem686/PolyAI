@@ -122,6 +122,50 @@ jobs:
             -auto-approve \
             -var-file="tfvars/${{ inputs.region }}.tfvars"
 
+      - name: Wait for worker ASG rollout
+        working-directory: infra/tf
+        run: |
+          set -euo pipefail
+
+          ASG_NAME="$(terraform output -raw worker_autoscaling_group_name)"
+
+          for attempt in $(seq 1 120); do
+            TARGET_VERSION="$(
+              aws autoscaling describe-auto-scaling-groups \
+                --region "${{ inputs.region }}" \
+                --auto-scaling-group-names "$ASG_NAME" \
+                --query 'AutoScalingGroups[0].LaunchTemplate.Version' \
+                --output text
+            )"
+
+            INSTANCE_ROWS="$(
+              aws autoscaling describe-auto-scaling-groups \
+                --region "${{ inputs.region }}" \
+                --auto-scaling-group-names "$ASG_NAME" \
+                --query 'AutoScalingGroups[0].Instances[].[LifecycleState,HealthStatus,LaunchTemplate.Version]' \
+                --output text
+            )"
+
+            if [ -n "$INSTANCE_ROWS" ] \
+              && awk -v target="$TARGET_VERSION" '
+                NF != 3 || $1 != "InService" || $2 != "Healthy" || $3 != target {
+                  invalid = 1
+                }
+                END { exit invalid }
+              ' <<< "$INSTANCE_ROWS"; then
+              echo "All worker instances use launch-template version $TARGET_VERSION."
+              break
+            fi
+
+            if [ "$attempt" -eq 120 ]; then
+              echo "Timed out waiting for the worker ASG rollout."
+              exit 1
+            fi
+
+            echo "Waiting for worker ASG rollout to version $TARGET_VERSION..."
+            sleep 10
+          done
+
       - name: Export Terraform outputs
         id: terraform_outputs
         working-directory: infra/tf

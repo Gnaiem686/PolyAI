@@ -245,7 +245,7 @@ resource "aws_iam_role_policy" "worker_source_dest_check" {
 
         Condition = {
           StringEquals = {
-            "ec2:Attribute"        = "sourceDestCheck"
+            "ec2:Attribute"        = "SourceDestCheck"
             "ec2:ResourceTag/Name" = "${var.name_prefix}-${var.environment}-worker"
           }
         }
@@ -348,6 +348,9 @@ resource "aws_launch_template" "worker" {
       name_prefix               = var.name_prefix
       environment               = var.environment
       control_plane_instance_id = aws_instance.control_plane.id
+      source_dest_check_policy_hash = sha256(
+        aws_iam_role_policy.worker_source_dest_check.policy
+      )
     })
   )
 
