@@ -8,6 +8,10 @@ on:
         required: true
         default: us-east-1
         type: string
+      admin_ssh_cidr:
+        description: Administrator public IPv4 CIDR allowed to SSH (for example, 203.0.113.10/32)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -19,6 +23,7 @@ concurrency:
 env:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
+  TF_VAR_ssh_allowed_cidr: ${{ inputs.admin_ssh_cidr }}
 
 jobs:
   provision:

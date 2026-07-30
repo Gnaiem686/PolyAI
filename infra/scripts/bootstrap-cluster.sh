@@ -25,8 +25,13 @@ kubectl wait \
   deployment/tigera-operator \
   --timeout=10m
 
-kubectl apply \
-  -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/custom-resources.yaml"
+# AWS may place the control plane and workers in the same subnet. Always use
+# VXLAN so cross-node pod traffic is encapsulated instead of being rejected by
+# EC2 source/destination checks.
+curl --fail --silent --show-error --location \
+  "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/custom-resources.yaml" \
+  | sed 's/encapsulation: VXLANCrossSubnet/encapsulation: VXLAN/' \
+  | kubectl apply -f -
 
 kubectl wait \
   --for=condition=Ready \
