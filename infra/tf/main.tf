@@ -27,7 +27,7 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  ssh_allowed_cidr = "${trimspace(data.http.current_public_ip.response_body)}/32"
+  ssh_allowed_cidr = var.ssh_allowed_cidr != null ? var.ssh_allowed_cidr : "${trimspace(data.http.current_public_ip.response_body)}/32"
   environment      = terraform.workspace == "default" ? "shared" : terraform.workspace
 
   selected_availability_zones = slice(
