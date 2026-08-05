@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: agent
-          image: gnaiem686/polyai-agent:4fa76cf6bda508e208490967c5f4c2521706ddbe
+          image: gnaiem686/polyai-agent:e69e8870adf590780f3b3a1faf8005a1617cd73e
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
