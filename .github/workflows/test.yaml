@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - dev
 
 jobs:
   test:
@@ -25,6 +26,9 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ --cov=app --cov-report=xml
         working-directory: services/yolo
+
+      - name: Test cluster cleanup safety
+        run: bash infra/scripts/tests/test-cleanup-cluster.sh
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
