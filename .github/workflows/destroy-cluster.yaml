@@ -1,0 +1,145 @@
+name: Destroy Kubernetes Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: AWS region to destroy
+        required: true
+        default: us-east-1
+        type: string
+      confirmation:
+        description: Type DESTROY to confirm removal of the cluster
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: polyai-cluster-${{ inputs.region }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  destroy:
+    name: Clean Kubernetes and destroy AWS infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require explicit confirmation
+        run: |
+          if [ "${{ inputs.confirmation }}" != "DESTROY" ]; then
+            echo "Confirmation must be exactly DESTROY."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Initialize Terraform state
+        id: terraform
+        working-directory: infra/tf
+        run: |
+          set -euo pipefail
+
+          TFVARS_FILE="tfvars/${{ inputs.region }}.tfvars"
+
+          if [ ! -f "$TFVARS_FILE" ]; then
+            echo "Missing Terraform variables file: $TFVARS_FILE"
+            exit 1
+          fi
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="polyai-tfstate-${ACCOUNT_ID}-${{ inputs.region }}"
+
+          terraform init \
+            -reconfigure \
+            -backend-config="bucket=${BUCKET}" \
+            -backend-config="key=polyai-cluster.tfstate" \
+            -backend-config="region=${{ inputs.region }}" \
+            -backend-config="encrypt=true"
+
+          terraform workspace select "${{ inputs.region }}"
+
+          echo "control_plane_ip=$(terraform output -raw control_plane_public_ip)" >> "$GITHUB_OUTPUT"
+          echo "control_plane_security_group_id=$(terraform output -raw control_plane_security_group_id)" >> "$GITHUB_OUTPUT"
+
+      - name: Clean Kubernetes resources over SSH
+        env:
+          CONTROL_PLANE_IP: ${{ steps.terraform.outputs.control_plane_ip }}
+          CONTROL_PLANE_SG: ${{ steps.terraform.outputs.control_plane_security_group_id }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          RUNNER_CIDR="$(curl -fsSL https://checkip.amazonaws.com)/32"
+          KEY_FILE="${RUNNER_TEMP}/polyai-cluster.pem"
+          ADDED_SSH_RULE="false"
+
+          cleanup() {
+            if [ "$ADDED_SSH_RULE" = "true" ]; then
+              aws ec2 revoke-security-group-ingress \
+                --region "${{ inputs.region }}" \
+                --group-id "$CONTROL_PLANE_SG" \
+                --protocol tcp \
+                --port 22 \
+                --cidr "$RUNNER_CIDR" >/dev/null \
+                || true
+            fi
+
+            rm -f "$KEY_FILE"
+          }
+
+          trap cleanup EXIT
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          if aws ec2 authorize-security-group-ingress \
+            --region "${{ inputs.region }}" \
+            --group-id "$CONTROL_PLANE_SG" \
+            --protocol tcp \
+            --port 22 \
+            --cidr "$RUNNER_CIDR" >/dev/null 2>&1; then
+            ADDED_SSH_RULE="true"
+          fi
+
+          scp \
+            -i "$KEY_FILE" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            infra/scripts/cleanup-cluster.sh \
+            "ubuntu@${CONTROL_PLANE_IP}:/tmp/cleanup-cluster.sh"
+
+          ssh \
+            -i "$KEY_FILE" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            "ubuntu@${CONTROL_PLANE_IP}" \
+            "sudo bash /tmp/cleanup-cluster.sh"
+
+      - name: Destroy Terraform infrastructure
+        working-directory: infra/tf
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -var-file="tfvars/${{ inputs.region }}.tfvars"

@@ -10,7 +10,7 @@ spec:
     targetRevision: dev
     path: infra/k8s/dev
     directory:
-      include: "{agent.yaml,agent-service.yaml,agent-hpa.yaml}"
+      include: "{agent.yaml,agent-service.yaml,agent-hpa.yaml,agent-ingress.yaml,agent-servicemonitor.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: dev

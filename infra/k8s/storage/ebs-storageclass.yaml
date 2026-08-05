@@ -3,7 +3,9 @@ kind: StorageClass
 metadata:
   name: ebs-sc
 provisioner: ebs.csi.aws.com
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
 parameters:
   type: gp3
+  encrypted: "true"
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

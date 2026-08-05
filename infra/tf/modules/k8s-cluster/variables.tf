@@ -62,3 +62,8 @@ variable "ami_id" {
   description = "AMI ID used by the control plane and worker nodes"
   type        = string
 }
+
+variable "sns_topic_arn" {
+  description = "SNS topic that Alertmanager running on worker nodes may publish to"
+  type        = string
+}

@@ -12,4 +12,4 @@ ssh_key_name = "gnaiem-key"
 
 worker_min_size         = 1
 worker_max_size         = 3
-worker_desired_capacity = 1
+worker_desired_capacity = 2

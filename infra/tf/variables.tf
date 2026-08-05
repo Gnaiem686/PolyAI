@@ -94,3 +94,51 @@ variable "name_prefix" {
   type        = string
   default     = "gnaiem-tf"
 }
+
+variable "hosted_zone_name" {
+  description = "Existing public Route 53 hosted zone used for cluster DNS records"
+  type        = string
+  default     = "fursa.click"
+}
+
+variable "domain_prefix" {
+  description = "Student-specific DNS label created beneath the shared hosted zone"
+  type        = string
+  default     = "gnaiem"
+}
+
+variable "ingress_http_node_port" {
+  description = "Fixed ingress-nginx HTTP NodePort targeted by the ALB"
+  type        = number
+  default     = 30080
+
+  validation {
+    condition     = var.ingress_http_node_port >= 30000 && var.ingress_http_node_port <= 32767
+    error_message = "ingress_http_node_port must be in the Kubernetes NodePort range 30000-32767."
+  }
+}
+
+variable "ingress_https_node_port" {
+  description = "Fixed ingress-nginx HTTPS NodePort"
+  type        = number
+  default     = 30443
+
+  validation {
+    condition     = var.ingress_https_node_port >= 30000 && var.ingress_https_node_port <= 32767
+    error_message = "ingress_https_node_port must be in the Kubernetes NodePort range 30000-32767."
+  }
+}
+
+variable "alert_email" {
+  description = "Email endpoint subscribed to monitoring alerts; confirmation is required after apply"
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = var.alert_email == null ? true : can(
+      regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email)
+    )
+    error_message = "alert_email must be a valid email address."
+  }
+}
