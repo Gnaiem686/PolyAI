@@ -3,7 +3,12 @@ controller:
 
   config:
     use-forwarded-headers: "true"
-    proxy-real-ip-cidr: "10.0.0.0/16"
+    # The ALB reaches a worker through the VPC CIDR. With externalTrafficPolicy
+    # set to Cluster, kube-proxy may then forward the request through the Calico
+    # pod network to an ingress controller on another worker. Trust both
+    # internal hops so Nginx evaluates source allowlists against the original
+    # client address from X-Forwarded-For.
+    proxy-real-ip-cidr: "10.0.0.0/16,192.168.0.0/16"
 
   service:
     type: NodePort
