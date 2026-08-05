@@ -77,8 +77,10 @@ kubectl delete applications.argoproj.io \
 
 # Pods assigned to a worker that was terminated outside Kubernetes cannot
 # finish their normal grace period because that node's kubelet is gone.
-# Remove their API objects so namespace deletion can complete during destroy.
-for namespace in dev prod; do
+# Remove their API objects so namespace deletion can make progress during
+# destroy. These namespaces contain no remaining cloud-backed storage because
+# EBS PersistentVolumes were checked above.
+for namespace in dev prod monitoring argocd; do
   kubectl delete pods \
     --namespace "$namespace" \
     --all \
@@ -88,17 +90,11 @@ for namespace in dev prod; do
     --wait=false
 done
 
-kubectl delete namespace dev prod \
-  --ignore-not-found \
-  --wait=true \
-  --timeout=10m
-
 echo "Removing cluster add-ons..."
 
-kubectl delete namespace monitoring argocd \
+kubectl delete namespace dev prod monitoring argocd \
   --ignore-not-found \
-  --wait=true \
-  --timeout=10m
+  --wait=false
 
 if command -v helm >/dev/null 2>&1 \
   && helm status ingress-nginx --namespace ingress-nginx >/dev/null 2>&1; then
