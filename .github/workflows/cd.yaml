@@ -78,6 +78,8 @@ jobs:
           fi
 
           while read -r SERVICE; do
+            BUILD_ARGS=()
+
             case "$SERVICE" in
               agent)
                 CONTEXT="services/agent"
@@ -88,6 +90,17 @@ jobs:
                 CONTEXT="services/frontend"
                 IMAGE="gnaiem686/polyai-frontend"
                 MANIFEST="infra/k8s/${ENVIRONMENT}/frontend.yaml"
+
+                if [ "$ENVIRONMENT" = "dev" ]; then
+                  AGENT_PUBLIC_URL="https://agent-dev.gnaiem.fursa.click"
+                else
+                  AGENT_PUBLIC_URL="https://agent-prod.gnaiem.fursa.click"
+                fi
+
+                BUILD_ARGS+=(
+                  --build-arg
+                  "NEXT_PUBLIC_AGENT_URL=${AGENT_PUBLIC_URL}"
+                )
                 ;;
               img-proc-mcp)
                 CONTEXT="services/img-proc-mcp"
@@ -106,6 +119,7 @@ jobs:
             esac
 
             docker build \
+              "${BUILD_ARGS[@]}" \
               --tag "${IMAGE}:${CURRENT_SHA}" \
               "$CONTEXT"
 

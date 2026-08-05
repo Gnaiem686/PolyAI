@@ -43,10 +43,13 @@ jobs:
         service:
           - context: services/yolo
             image: yolo-service
+            build_args: ""
           - context: services/agent
             image: agent-service
+            build_args: ""
           - context: services/frontend
             image: frontend-service
+            build_args: NEXT_PUBLIC_AGENT_URL=http://localhost:8000
 
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +65,7 @@ jobs:
           push: false
           load: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service.image }}:scout-test
+          build-args: ${{ matrix.service.build_args }}
 
       - uses: docker/scout-action@v1.18.2
         with:

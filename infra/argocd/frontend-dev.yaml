@@ -10,7 +10,7 @@ spec:
     targetRevision: dev
     path: infra/k8s/dev
     directory:
-      include: "{frontend.yaml,frontend-service.yaml,frontend-hpa.yaml}"
+      include: "{frontend.yaml,frontend-service.yaml,frontend-hpa.yaml,frontend-ingress.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: dev

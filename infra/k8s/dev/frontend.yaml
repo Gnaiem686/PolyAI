@@ -25,7 +25,7 @@ spec:
             - name: AGENT_URL
               value: "http://agent-svc:8000"
             - name: NEXT_PUBLIC_AGENT_URL
-              value: "http://54.91.9.69:8000"
+              value: "https://agent-dev.gnaiem.fursa.click"
           readinessProbe:
             httpGet:
               path: /ready

@@ -10,7 +10,7 @@ spec:
     targetRevision: dev
     path: infra/k8s/dev
     directory:
-      include: "{yolo.yaml,yolo-service.yaml,yolo-hpa.yaml}"
+      include: "{yolo.yaml,yolo-service.yaml,yolo-hpa.yaml,yolo-servicemonitor.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: dev
