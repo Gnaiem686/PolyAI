@@ -75,6 +75,19 @@ kubectl delete applications.argoproj.io \
   --ignore-not-found \
   --wait=false
 
+# Pods assigned to a worker that was terminated outside Kubernetes cannot
+# finish their normal grace period because that node's kubelet is gone.
+# Remove their API objects so namespace deletion can complete during destroy.
+for namespace in dev prod; do
+  kubectl delete pods \
+    --namespace "$namespace" \
+    --all \
+    --ignore-not-found \
+    --force \
+    --grace-period=0 \
+    --wait=false
+done
+
 kubectl delete namespace dev prod \
   --ignore-not-found \
   --wait=true \
