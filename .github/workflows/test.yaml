@@ -30,6 +30,9 @@ jobs:
       - name: Test cluster cleanup safety
         run: bash infra/scripts/tests/test-cleanup-cluster.sh
 
+      - name: Test ingress client IP configuration
+        run: bash infra/scripts/tests/test-ingress-values.sh
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
