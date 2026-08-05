@@ -205,6 +205,30 @@ resource "aws_iam_role_policy_attachment" "worker_ecr_read_only" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+resource "aws_iam_role_policy_attachment" "worker_ebs_csi_policy" {
+  role       = aws_iam_role.worker.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+resource "aws_iam_role_policy" "worker_sns_publish" {
+  name = "${var.name_prefix}-${var.environment}-worker-sns-publish"
+  role = aws_iam_role.worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sns:Publish"
+        ]
+        Resource = var.sns_topic_arn
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "worker_join_command" {
   name = "${var.name_prefix}-${var.environment}-worker-join-command"
   role = aws_iam_role.worker.id
@@ -335,6 +359,12 @@ resource "aws_launch_template" "worker" {
     name = aws_iam_instance_profile.worker.name
   }
 
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
   network_interfaces {
     associate_public_ip_address = true
     security_groups = [
@@ -434,6 +464,8 @@ resource "aws_autoscaling_group" "worker" {
   depends_on = [
     aws_iam_role_policy.worker_join_command,
     aws_iam_role_policy.worker_source_dest_check,
-    aws_iam_role_policy_attachment.worker_ecr_read_only
+    aws_iam_role_policy.worker_sns_publish,
+    aws_iam_role_policy_attachment.worker_ecr_read_only,
+    aws_iam_role_policy_attachment.worker_ebs_csi_policy
   ]
 }

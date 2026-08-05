@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: gnaiem686/polyai-frontend:ca1dd05312842e3523f936104fff41bb9cf62a57
+          image: gnaiem686/polyai-frontend:098fabec768d52ace61e41047b177787df644a7f
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
@@ -25,7 +25,7 @@ spec:
             - name: AGENT_URL
               value: "http://agent-svc:8000"
             - name: NEXT_PUBLIC_AGENT_URL
-              value: "http://54.91.9.69:8000"
+              value: "https://agent-dev.gnaiem.fursa.click"
           readinessProbe:
             httpGet:
               path: /ready

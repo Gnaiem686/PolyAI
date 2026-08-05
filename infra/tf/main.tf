@@ -85,4 +85,23 @@ module "k8s_cluster" {
   ssh_key_name     = var.ssh_key_name
   ssh_allowed_cidr = local.ssh_allowed_cidr
   ami_id           = var.ami_id
+
+  sns_topic_arn = aws_sns_topic.alerts.arn
+}
+
+module "ingress" {
+  source = "./modules/ingress"
+
+  name_prefix = var.name_prefix
+  environment = local.environment
+
+  vpc_id            = module.vpc.vpc_id
+  public_subnet_ids = module.vpc.public_subnets
+
+  worker_security_group_id = module.k8s_cluster.worker_security_group_id
+  worker_asg_name          = module.k8s_cluster.worker_autoscaling_group_name
+
+  hosted_zone_name = var.hosted_zone_name
+  domain_prefix    = var.domain_prefix
+  http_node_port   = var.ingress_http_node_port
 }

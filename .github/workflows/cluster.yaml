@@ -12,6 +12,10 @@ on:
         description: Administrator public IPv4 CIDR allowed to SSH (for example, 203.0.113.10/32)
         required: true
         type: string
+      alert_email:
+        description: Email address that receives Alertmanager notifications (confirm the AWS SNS email after provisioning)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +28,7 @@ env:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
   TF_VAR_ssh_allowed_cidr: ${{ inputs.admin_ssh_cidr }}
+  TF_VAR_alert_email: ${{ inputs.alert_email }}
 
 jobs:
   provision:
@@ -33,6 +38,9 @@ jobs:
     outputs:
       control_plane_ip: ${{ steps.terraform_outputs.outputs.control_plane_ip }}
       control_plane_security_group_id: ${{ steps.terraform_outputs.outputs.control_plane_security_group_id }}
+      alertmanager_sns_topic_arn: ${{ steps.terraform_outputs.outputs.alertmanager_sns_topic_arn }}
+      ingress_http_node_port: ${{ steps.terraform_outputs.outputs.ingress_http_node_port }}
+      ingress_https_node_port: ${{ steps.terraform_outputs.outputs.ingress_https_node_port }}
 
     steps:
       - name: Checkout repository
@@ -172,6 +180,9 @@ jobs:
         run: |
           echo "control_plane_ip=$(terraform output -raw control_plane_public_ip)" >> "$GITHUB_OUTPUT"
           echo "control_plane_security_group_id=$(terraform output -raw control_plane_security_group_id)" >> "$GITHUB_OUTPUT"
+          echo "alertmanager_sns_topic_arn=$(terraform output -raw alertmanager_sns_topic_arn)" >> "$GITHUB_OUTPUT"
+          echo "ingress_http_node_port=$(terraform output -raw ingress_http_node_port)" >> "$GITHUB_OUTPUT"
+          echo "ingress_https_node_port=$(terraform output -raw ingress_https_node_port)" >> "$GITHUB_OUTPUT"
 
   bootstrap:
     name: Bootstrap
@@ -193,6 +204,9 @@ jobs:
         env:
           CONTROL_PLANE_IP: ${{ needs.provision.outputs.control_plane_ip }}
           CONTROL_PLANE_SG: ${{ needs.provision.outputs.control_plane_security_group_id }}
+          SNS_TOPIC_ARN: ${{ needs.provision.outputs.alertmanager_sns_topic_arn }}
+          INGRESS_HTTP_NODE_PORT: ${{ needs.provision.outputs.ingress_http_node_port }}
+          INGRESS_HTTPS_NODE_PORT: ${{ needs.provision.outputs.ingress_https_node_port }}
           SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
@@ -265,7 +279,8 @@ jobs:
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=20 \
             infra/scripts/bootstrap-cluster.sh \
-            "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/bootstrap-cluster.sh"
+            infra/scripts/test-alert-chain.sh \
+            "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/"
 
           scp \
             -i "$KEY_FILE" \
@@ -276,6 +291,15 @@ jobs:
             -r infra/argocd \
             "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/argocd"
 
+          scp \
+            -i "$KEY_FILE" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            -r infra/k8s \
+            "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/k8s"
+
           ssh \
             -i "$KEY_FILE" \
             -o StrictHostKeyChecking=no \
@@ -283,4 +307,4 @@ jobs:
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=20 \
             "ubuntu@${CONTROL_PLANE_IP}" \
-            "sudo bash /tmp/polyai-bootstrap/bootstrap-cluster.sh /tmp/polyai-bootstrap/argocd"
+            "sudo bash /tmp/polyai-bootstrap/bootstrap-cluster.sh /tmp/polyai-bootstrap/argocd /tmp/polyai-bootstrap/k8s/ingress /tmp/polyai-bootstrap/k8s/storage /tmp/polyai-bootstrap/k8s/monitoring '$SNS_TOPIC_ARN' '${{ inputs.region }}' '${{ inputs.admin_ssh_cidr }}' '$INGRESS_HTTP_NODE_PORT' '$INGRESS_HTTPS_NODE_PORT'"

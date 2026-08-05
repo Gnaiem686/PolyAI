@@ -3,11 +3,14 @@ kind: Service
 metadata:
   name: yolo-svc
   namespace: dev
+  labels:
+    app: yolo
 spec:
   type: ClusterIP
   selector:
     app: yolo
   ports:
-    - protocol: TCP
+    - name: metrics
+      protocol: TCP
       port: 8080
       targetPort: 8080
