@@ -29,20 +29,28 @@ done
 
 echo "Removing kube-prometheus-stack..."
 
-if ! command -v helm >/dev/null 2>&1; then
-  echo "Helm is required to safely remove kube-prometheus-stack."
-  exit 1
+if command -v helm >/dev/null 2>&1; then
+  helm uninstall monitoring \
+    --namespace monitoring \
+    --no-hooks \
+    --ignore-not-found
+else
+  if ! MONITORING_NAMESPACE=$(
+    kubectl get namespace monitoring \
+      --ignore-not-found \
+      --output=name
+  ); then
+    echo "Could not determine whether the monitoring namespace exists."
+    exit 1
+  fi
+
+  if [ -n "$MONITORING_NAMESPACE" ]; then
+    echo "Helm is missing while the monitoring namespace still exists."
+    exit 1
+  fi
+
+  echo "Helm and the monitoring namespace are already absent; continuing storage verification."
 fi
-
-kubectl rollout status \
-  --namespace kube-system \
-  deployment/ebs-csi-controller \
-  --timeout=10m
-
-helm uninstall monitoring \
-  --namespace monitoring \
-  --no-hooks \
-  --ignore-not-found
 
 # A pod on a terminated worker cannot release the PVC protection finalizer.
 # Remove monitoring pods before the blocking PVC and EBS volume checks.
@@ -54,6 +62,18 @@ if ! kubectl delete pods \
   --grace-period=0 \
   --wait=false; then
   echo "Warning: could not force-delete pods in namespace monitoring."
+fi
+
+EBS_PVS=$(
+  kubectl get persistentvolume \
+    --output=jsonpath='{range .items[?(@.spec.storageClassName=="ebs-sc")]}{.metadata.name}{"\n"}{end}'
+)
+
+if [ -n "$EBS_PVS" ]; then
+  kubectl rollout status \
+    --namespace kube-system \
+    deployment/ebs-csi-controller \
+    --timeout=10m
 fi
 
 kubectl delete persistentvolumeclaim \
