@@ -149,5 +149,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(cd): update ${{ github.ref_name }} image tags [skip ci]"
+          git commit -m "chore(cd): update ${{ github.ref_name }} image tags"
           git push origin "HEAD:${{ github.ref_name }}"
