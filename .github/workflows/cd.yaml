@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update-images:
@@ -135,6 +136,7 @@ jobs:
       - name: Commit updated image tags
         if: steps.update.outputs.changed == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           MANIFEST_ENVIRONMENT: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
         run: |
           set -euo pipefail
@@ -150,4 +152,17 @@ jobs:
           fi
 
           git commit -m "chore(cd): update ${{ github.ref_name }} image tags"
-          git push origin "HEAD:${{ github.ref_name }}"
+
+          if [ "${{ github.ref_name }}" = "dev" ]; then
+            git push origin HEAD:dev
+          else
+            UPDATE_BRANCH="cd/prod-${GITHUB_SHA:0:12}-${GITHUB_RUN_ATTEMPT}"
+
+            git push origin "HEAD:${UPDATE_BRANCH}"
+
+            gh pr create \
+              --base main \
+              --head "$UPDATE_BRANCH" \
+              --title "chore(cd): update production image tags" \
+              --body "Automated production manifest update for commit ${GITHUB_SHA}. Merge manually after the required checks pass."
+          fi
