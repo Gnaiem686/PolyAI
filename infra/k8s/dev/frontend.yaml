@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: gnaiem686/polyai-frontend:ca1dd05312842e3523f936104fff41bb9cf62a57
+          image: gnaiem686/polyai-frontend:098fabec768d52ace61e41047b177787df644a7f
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
