@@ -15,6 +15,16 @@ printf 'kubectl %s\n' "$*" >> "$COMMAND_CALLS"
 
 if [[ "$*" == *"get nodes"* ]]; then
   printf 'worker-test True\n'
+elif [[ "$*" == "get namespace monitoring --ignore-not-found --output=name" ]]; then
+  if [ "${MONITORING_NAMESPACE_LOOKUP_ERROR:-false}" = "true" ]; then
+    exit 45
+  fi
+  if [ "${MONITORING_NAMESPACE_EXISTS:-true}" = "true" ]; then
+    printf 'namespace/monitoring\n'
+  fi
+elif [[ "$*" == *"rollout status --namespace kube-system deployment/ebs-csi-controller"* ]] \
+  && [ "${EBS_CONTROLLER_EXISTS:-true}" = "false" ]; then
+  exit 46
 elif [[ "$*" == *"get persistentvolume "* ]]; then
   if [ "${EBS_PVS_REMAIN:-false}" = "true" ]; then
     printf 'pv-test\n'
@@ -64,6 +74,12 @@ export KUBECTL_CALLS="$TEST_DIR/kubectl-calls"
 export HELM_CALLS="$TEST_DIR/helm-calls"
 export COMMAND_CALLS="$TEST_DIR/command-calls"
 export PATH="$TEST_DIR/bin:$PATH"
+
+mkdir -p "$TEST_DIR/bin-without-helm"
+ln -s "$TEST_DIR/bin/kubectl" "$TEST_DIR/bin-without-helm/kubectl"
+ln -s "$TEST_DIR/bin/sleep" "$TEST_DIR/bin-without-helm/sleep"
+ln -s "$(command -v awk)" "$TEST_DIR/bin-without-helm/awk"
+ln -s "$(command -v seq)" "$TEST_DIR/bin-without-helm/seq"
 
 bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh"
 
@@ -129,5 +145,26 @@ fi
 
 FAIL_POST_STORAGE=true \
   bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh" >/dev/null 2>&1
+
+EBS_CONTROLLER_EXISTS=false \
+  bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh" >/dev/null 2>&1
+
+MONITORING_NAMESPACE_EXISTS=false \
+PATH="$TEST_DIR/bin-without-helm" \
+  /bin/bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh" >/dev/null 2>&1
+
+if MONITORING_NAMESPACE_EXISTS=true \
+  PATH="$TEST_DIR/bin-without-helm" \
+  /bin/bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh" >/dev/null 2>&1; then
+  echo "missing Helm must fail when the monitoring namespace still exists" >&2
+  exit 1
+fi
+
+if MONITORING_NAMESPACE_LOOKUP_ERROR=true \
+  PATH="$TEST_DIR/bin-without-helm" \
+  /bin/bash "$REPO_ROOT/infra/scripts/cleanup-cluster.sh" >/dev/null 2>&1; then
+  echo "monitoring namespace lookup errors must stop cleanup" >&2
+  exit 1
+fi
 
 echo "cleanup-cluster dead-node pod test passed"
