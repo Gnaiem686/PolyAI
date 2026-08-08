@@ -13,6 +13,16 @@ variable "image_bucket_name" {
   }
 }
 
+variable "bedrock_model_id" {
+  description = "Amazon Bedrock foundation model invoked by the PolyAI agent"
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.bedrock_model_id)) > 0
+    error_message = "bedrock_model_id must not be empty."
+  }
+}
+
 variable "ami_id" {
   description = "Pinned Ubuntu AMI ID for the selected AWS region"
   type        = string

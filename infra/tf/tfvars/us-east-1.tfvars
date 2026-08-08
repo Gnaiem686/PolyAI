@@ -2,6 +2,7 @@ region = "us-east-1"
 ami_id = "ami-052355af2a014bd2c"
 
 image_bucket_name = "gnaiem-polyai-images"
+bedrock_model_id  = "amazon.nova-micro-v1:0"
 
 vpc_cidr = "10.0.0.0/16"
 

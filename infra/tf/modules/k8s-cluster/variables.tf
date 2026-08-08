@@ -18,6 +18,11 @@ variable "image_bucket_name" {
   type        = string
 }
 
+variable "bedrock_model_id" {
+  description = "Amazon Bedrock foundation model that workloads may invoke"
+  type        = string
+}
+
 variable "vpc_id" {
   description = "ID of the VPC used by the Kubernetes cluster"
   type        = string
