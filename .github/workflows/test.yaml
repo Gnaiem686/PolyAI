@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-      - dev
 
 jobs:
   test:
@@ -38,6 +37,9 @@ jobs:
 
       - name: Test worker Bedrock model permission
         run: bash infra/scripts/tests/test-worker-bedrock-policy.sh
+
+      - name: Test Grafana Nginx dashboard provider
+        run: bash infra/scripts/tests/test-grafana-dashboard-provider.sh
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
