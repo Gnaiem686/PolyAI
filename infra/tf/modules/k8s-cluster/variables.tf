@@ -13,6 +13,11 @@ variable "region" {
   type        = string
 }
 
+variable "image_bucket_name" {
+  description = "Existing S3 bucket used by workloads for image input and output objects"
+  type        = string
+}
+
 variable "vpc_id" {
   description = "ID of the VPC used by the Kubernetes cluster"
   type        = string
