@@ -44,26 +44,6 @@ grafana:
     limits:
       memory: 512Mi
 
-  dashboards:
-    default:
-      nginx-ingress-controller:
-        gnetId: 9614
-        revision: 1
-        datasource: Prometheus
-
-  dashboardProviders:
-    dashboardproviders.yaml:
-      apiVersion: 1
-      providers:
-        - name: nginx-ingress-controller
-          orgId: 1
-          folder: ""
-          type: file
-          disableDeletion: false
-          editable: false
-          options:
-            path: /var/lib/grafana/dashboards/default
-
 alertmanager:
   config:
     global:
