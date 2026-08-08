@@ -249,6 +249,25 @@ resource "aws_iam_role_policy" "worker_s3_objects" {
   })
 }
 
+resource "aws_iam_role_policy" "worker_bedrock_invoke" {
+  name = "${var.name_prefix}-${var.environment}-worker-bedrock-invoke"
+  role = aws_iam_role.worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel"
+        ]
+        Resource = "arn:aws:bedrock:${var.region}::foundation-model/${var.bedrock_model_id}"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "worker_join_command" {
   name = "${var.name_prefix}-${var.environment}-worker-join-command"
   role = aws_iam_role.worker.id
@@ -482,6 +501,7 @@ resource "aws_autoscaling_group" "worker" {
   }
 
   depends_on = [
+    aws_iam_role_policy.worker_bedrock_invoke,
     aws_iam_role_policy.worker_join_command,
     aws_iam_role_policy.worker_source_dest_check,
     aws_iam_role_policy.worker_s3_objects,
