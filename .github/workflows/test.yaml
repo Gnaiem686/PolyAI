@@ -36,6 +36,9 @@ jobs:
       - name: Test worker S3 object permissions
         run: bash infra/scripts/tests/test-worker-s3-policy.sh
 
+      - name: Test worker Bedrock model permission
+        run: bash infra/scripts/tests/test-worker-bedrock-policy.sh
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:

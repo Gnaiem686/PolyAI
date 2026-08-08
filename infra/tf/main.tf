@@ -73,6 +73,7 @@ module "k8s_cluster" {
   region      = var.region
 
   image_bucket_name = var.image_bucket_name
+  bedrock_model_id  = var.bedrock_model_id
 
   vpc_id            = module.vpc.vpc_id
   public_subnet_ids = module.vpc.public_subnets
