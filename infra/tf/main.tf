@@ -72,6 +72,8 @@ module "k8s_cluster" {
   environment = local.environment
   region      = var.region
 
+  image_bucket_name = var.image_bucket_name
+
   vpc_id            = module.vpc.vpc_id
   public_subnet_ids = module.vpc.public_subnets
 

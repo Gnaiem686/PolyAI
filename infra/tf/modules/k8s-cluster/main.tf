@@ -229,6 +229,26 @@ resource "aws_iam_role_policy" "worker_sns_publish" {
   })
 }
 
+resource "aws_iam_role_policy" "worker_s3_objects" {
+  name = "${var.name_prefix}-${var.environment}-worker-s3-objects"
+  role = aws_iam_role.worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject"
+        ]
+        Resource = "arn:aws:s3:::${var.image_bucket_name}/*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "worker_join_command" {
   name = "${var.name_prefix}-${var.environment}-worker-join-command"
   role = aws_iam_role.worker.id
@@ -464,6 +484,7 @@ resource "aws_autoscaling_group" "worker" {
   depends_on = [
     aws_iam_role_policy.worker_join_command,
     aws_iam_role_policy.worker_source_dest_check,
+    aws_iam_role_policy.worker_s3_objects,
     aws_iam_role_policy.worker_sns_publish,
     aws_iam_role_policy_attachment.worker_ecr_read_only,
     aws_iam_role_policy_attachment.worker_ebs_csi_policy

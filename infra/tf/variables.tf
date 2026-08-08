@@ -3,6 +3,16 @@ variable "region" {
   type        = string
 }
 
+variable "image_bucket_name" {
+  description = "Existing S3 bucket used by PolyAI services for original and processed images"
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.image_bucket_name)) > 0
+    error_message = "image_bucket_name must not be empty."
+  }
+}
+
 variable "ami_id" {
   description = "Pinned Ubuntu AMI ID for the selected AWS region"
   type        = string
