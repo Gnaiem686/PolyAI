@@ -183,6 +183,32 @@ helm upgrade --install monitoring \
   --wait \
   --timeout 15m
 
+echo "Provisioning Nginx Ingress Controller Grafana dashboard..."
+
+NGINX_DASHBOARD_JSON=$(mktemp)
+NGINX_DASHBOARD_CONFIGMAP=$(mktemp)
+TEMP_FILES+=("$NGINX_DASHBOARD_JSON" "$NGINX_DASHBOARD_CONFIGMAP")
+
+curl --fail --silent --show-error --location \
+  "https://grafana.com/api/dashboards/9614/revisions/1/download" \
+  | sed '/-- .* --/! s/"datasource":.*,/"datasource": "Prometheus",/g' \
+  > "$NGINX_DASHBOARD_JSON"
+
+kubectl create configmap nginx-ingress-controller-dashboard \
+  --namespace monitoring \
+  --from-file="nginx-ingress-controller.json=${NGINX_DASHBOARD_JSON}" \
+  --dry-run=client \
+  --output=yaml \
+  > "$NGINX_DASHBOARD_CONFIGMAP"
+
+kubectl label \
+  --local \
+  --filename "$NGINX_DASHBOARD_CONFIGMAP" \
+  grafana_dashboard=1 \
+  --overwrite \
+  --output=yaml \
+  | kubectl apply -f -
+
 RENDERED_PROMETHEUS_INGRESS=$(mktemp)
 TEMP_FILES+=("$RENDERED_PROMETHEUS_INGRESS")
 
